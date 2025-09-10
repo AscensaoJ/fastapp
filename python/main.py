@@ -265,7 +265,7 @@ async def login_seeker(params: dict, request: Request, response: Response):
 
 @app.post('/login/employer')
 @limiter.limit(limit_value='40/minute')
-async def login_seeker(params: dict, request: Request, response: Response):
+async def login_employer(params: dict, request: Request, response: Response):
 	print('login attempt: employer')
 	new_time = get_new_time()
 	email = params['email']
