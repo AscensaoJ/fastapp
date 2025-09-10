@@ -180,6 +180,7 @@ async def register_employer(params: dict, request: Request, response: Response):
 		check = None
 		try:
 			check = await check_user(request, email)
+			bob('1')
 		except Exception as err:
 			raise CustomException(status_code=500, error=err, detail='check failed')
 		if not check:
@@ -194,7 +195,7 @@ async def register_employer(params: dict, request: Request, response: Response):
 			)
 		request.state.cursor.execute(
 			"INSERT INTO Employer (employer_id, first_name, last_name, user_pass, email, mobile, company, website, industry)"
-			"VALUES (uuid_to_bin(uuid()), %(first_name)s, %(last_name)s, %(pass)s, %(email)s, %(mobile)s, %(company)s, %(website)s, %(industry)s;"
+			"VALUES (uuid_to_bin(uuid()), %(first_name)s, %(last_name)s, %(pass)s, %(email)s, %(mobile)s, %(company)s, %(website)s, %(industry)s);"
 		,{
 					'first_name': first_name,
 					'last_name': last_name,
@@ -205,7 +206,7 @@ async def register_employer(params: dict, request: Request, response: Response):
 					'website': website,
 					'industry': industry
 				})
-		
+		bob('2')
 		users = await login(request, email, passwd, table='employer')
 		if type(users) == CustomException:
 			raise CustomException(status_code=users.status_code, error=users.error, detail=users.detail)
