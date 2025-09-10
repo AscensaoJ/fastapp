@@ -124,9 +124,9 @@ async def register_seeker(params: dict, request: Request, response: Response):
 		if check['exists'] != False:
 			raise CustomException(status_code=400, error='failed seeker add', detail=check['reason'])
 		# encrypt password, add user to database, respond to caller, and log successful registration
-		passwd = passwd.encode(encoding="utf-8")
+		passwd_bytes = passwd.encode(encoding="utf-8")
 		has = bcrypt.hashpw(
-			password=passwd,
+			password=passwd_bytes,
 			salt=bcrypt.gensalt()
 			)
 		request.state.cursor.execute(
@@ -139,7 +139,7 @@ async def register_seeker(params: dict, request: Request, response: Response):
 					'email': email
 				})
 		
-		users = await login(request, email, passwd, table='seeker')
+		users = await login(request, email, passwd_bytes, table='seeker')
 		if type(users) == CustomException:
 			raise CustomException(status_code=users.status_code, error=users.error, detail=users.detail)
 		return JSONResponse(status_code=200, content=users)
@@ -153,7 +153,7 @@ async def register_seeker(params: dict, request: Request, response: Response):
 				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /register/seeker | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail=err.detail)
 		else:
-			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /register/seeker| error: {err} | | @{get_remote_address(request)}\n')
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /register/seeker | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
 # Register endpoint for employer
@@ -180,17 +180,16 @@ async def register_employer(params: dict, request: Request, response: Response):
 		check = None
 		try:
 			check = await check_user(request, email)
-			bob('1')
 		except Exception as err:
 			raise CustomException(status_code=500, error=err, detail='check failed')
 		if not check:
 			raise CustomException(status_code=500, error=err, detail='check failed')
 		if check['exists'] != False:
-			raise CustomException(status_code=400, error='failed seeker add', detail=check['reason'])
+			raise CustomException(status_code=400, error='failed employer add', detail=check['reason'])
 		# encrypt password, add user to database, respond to caller, and log successful registration
-		passwd = passwd.encode(encoding="utf-8")
+		passwd_bytes = passwd.encode(encoding="utf-8")
 		has = bcrypt.hashpw(
-			password=passwd,
+			password=passwd_bytes,
 			salt=bcrypt.gensalt()
 			)
 		request.state.cursor.execute(
@@ -206,8 +205,7 @@ async def register_employer(params: dict, request: Request, response: Response):
 					'website': website,
 					'industry': industry
 				})
-		bob('2')
-		users = await login(request, email, passwd, table='employer')
+		users = await login(request, email, passwd_bytes, table='employer')
 		if type(users) == CustomException:
 			raise CustomException(status_code=users.status_code, error=users.error, detail=users.detail)
 		return JSONResponse(status_code=200, content=users)
@@ -221,7 +219,89 @@ async def register_employer(params: dict, request: Request, response: Response):
 				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /register/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail=err.detail)
 		else:
-			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /register/employer| error: {err} | | @{get_remote_address(request)}\n')
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /register/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.post('/login/seeker')
+@limiter.limit(limit_value='40/minute')
+async def login_seeker(params: dict, request: Request, response: Response):
+	print('login attempt: seeker')
+	new_time = get_new_time()
+	email = params['email']
+	passwd = params['pass']
+	try:
+		# Check if input exists and is safe
+		if not passwd or not email:
+			raise CustomException(status_code=400, error='failed seeker login', detail='missing field')
+		if not valid_san(passwd, 255) or not valid_san(email, 255):
+			raise CustomException(status_code=400, error='failed seeker login', detail='invalid input')
+		write_log(f'{set_timestamp(new_time)} | | source: /login/seeker | info: Login attempt: seeker | | attempt: {email}@{get_remote_address(request)}\n')
+		check = None
+		try:
+			check = await check_user(request, email)
+		except Exception as err:
+			raise CustomException(status_code=500, error=err, detail='check failed')
+		if not check:
+			raise CustomException(status_code=500, error=err, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed seeker login', detail=check['reason'])
+		passwd_bytes = passwd.encode(encoding="utf-8")
+		users = await login(request, email, passwd_bytes, table='seeker')
+		if type(users) == CustomException:
+			raise CustomException(status_code=users.status_code, error=users.error, detail=users.detail)
+		return JSONResponse(status_code=200, content=users)
+	except Exception as err:
+		print(err)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/seeker | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/seeker | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/seeker | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.post('/login/employer')
+@limiter.limit(limit_value='40/minute')
+async def login_seeker(params: dict, request: Request, response: Response):
+	print('login attempt: employer')
+	new_time = get_new_time()
+	email = params['email']
+	passwd = params['pass']
+	try:
+		# Check if input exists and is safe
+		if not passwd or not email:
+			raise CustomException(status_code=400, error='failed employer login', detail='missing field')
+		if not valid_san(passwd, 255) or not valid_san(email, 255):
+			raise CustomException(status_code=400, error='failed employer login', detail='invalid input')
+		write_log(f'{set_timestamp(new_time)} | | source: /login/employer | info: Login attempt: employer | | attempt: {email}@{get_remote_address(request)}\n')
+		check = None
+		try:
+			check = await check_user(request, email)
+		except Exception as err:
+			raise CustomException(status_code=500, error=err, detail='check failed')
+		if not check:
+			raise CustomException(status_code=500, error=err, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed employer login', detail=check['reason'])
+		passwd_bytes = passwd.encode(encoding="utf-8")
+		users = await login(request, email, passwd_bytes, table='employer')
+		if type(users) == CustomException:
+			raise CustomException(status_code=users.status_code, error=users.error, detail=users.detail)
+		return JSONResponse(status_code=200, content=users)
+	except Exception as err:
+		print(err)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
 @app.post('/resume')

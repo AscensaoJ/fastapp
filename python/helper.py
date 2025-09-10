@@ -114,7 +114,7 @@ async def check_user(request: Request, e_mail: str):
 			case 1 | None:
 				return {'exists': False, 'reason': 'user not found'}
 			case _:
-				raise CustomException(status_code=500, error='MySQL query error', detail='unexpected value returned while searching')
+				raise CustomException(status_code=500, error='MySQL query error', detail='unexpected value returned while looking for user')
 	except Exception as err:
 		print(err)
 		if type(err) == CustomException:
