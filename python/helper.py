@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Any, Dict, Optional, Sequence, Type, Union
 from typing_extensions import Annotated, Doc
 from dotenv import load_dotenv
+import traceback # for testing
 
 log_file = 'ape.log'
 folders = ['temp', 'images']
@@ -82,35 +83,37 @@ def get_new_time():
 async def check_user(request: Request, e_mail: str):
 	new_time = get_new_time()
 	try:
-		request.state.cursor.execute('''
-																				SELECT CASE 
-																						WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT delete_flag FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
-																						WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT delete_flag FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
-																						ELSE NULL
-																					END AS checked,
-																					CASE 
-																						WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT "employer" AS usertype)
-																						WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT "seeker" AS usertype)
-																						ELSE NULL
-																					END AS usertype,
-																					CASE 
-																						WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT HEX(employer_id) FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
-																						WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
-																							THEN (SELECT HEX(seeker_id) FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
-																						ELSE NULL
-																					END AS user_id;
-																				''',{
-																					'email': e_mail
-																				})
+		request.state.cursor.execute(
+			'''
+			SELECT CASE 
+					WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT delete_flag FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
+					WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT delete_flag FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
+					ELSE NULL
+				END AS checked,
+				CASE 
+					WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT "employer" AS usertype)
+					WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT "seeker" AS usertype)
+					ELSE NULL
+				END AS usertype,
+				CASE 
+					WHEN EXISTS(SELECT 1 FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT HEX(employer_id) FROM Employer WHERE (email = %(email)s AND delete_flag = 0))
+					WHEN EXISTS(SELECT 1 FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
+						THEN (SELECT HEX(seeker_id) FROM Seeker WHERE (email = %(email)s AND delete_flag = 0))
+					ELSE NULL
+				END AS user_id;
+			''',{
+				'email': e_mail
+			}
+		)
 		check = request.state.cursor.fetchone()
-		match check[0]:
+		match check['checked']:
 			case 0:
-				return {'exists': True, 'reason': 'email already registered', 'usertype': check[1], 'userId': check[2]}
+				return {'exists': True, 'reason': 'email already registered', 'usertype': check['usertype'], 'userId': check['user_id']}
 			case 1 | None:
 				return {'exists': False, 'reason': 'user not found'}
 			case _:
@@ -158,6 +161,7 @@ def check_folders():
 
 # For testing, easy to search and remove
 def bob(msg):
+	global it
 	if not msg:
 		print(it)
 		it += 1
@@ -193,7 +197,7 @@ def check_date(check):
 
 # Regex input validation
 # Special, Alphabetical, Numerical
-def valid_san(check, leng):
+def valid_san(check, leng:int = 255):
 	if type(check) == str:
 		if len(check) < 3 or len(check) > leng:
 			return False
@@ -385,6 +389,28 @@ def valid_exp_date(check):
 		write_log(f'{set_timestamp(new_time)} | | source: helper.valid_exp_date | error: ${err} | | server\n')
 		return False
 
+# Keyword arguments
+def valid_kwargs(check: str):
+	good: bool = False
+	check1: bool = False
+	check2: bool = False
+	check3: bool = False
+	try:
+		check.index(';')
+	except:
+		check1 = True
+	try:
+		check.index('/')
+	except:
+		check2 = True
+	try:
+		check.index('\\')
+	except:
+		check3 = True
+	if check1 == True and check2 == True and check3 == True:
+		good = True
+	return good
+
 # Convert datetime to unix timestamp
 def unix_timestamp(date):
 	new_time = datetime.datetime.now()
@@ -463,7 +489,8 @@ async def login(request: Request, email, passwd, table):
 	try:
 		users = None
 		if table == 'seeker':
-			request.state.cursor.execute('''
+			request.state.cursor.execute(
+				'''
 				SELECT first_name, last_name, user_pass, email, hex(seeker_id) AS user_id FROM Seeker
 					WHERE (email = %(email)s AND delete_flag = 0);
 				''',
@@ -471,7 +498,8 @@ async def login(request: Request, email, passwd, table):
 			)
 			users = request.state.cursor.fetchone()
 		elif table == 'employer':
-			request.state.cursor.execute('''
+			request.state.cursor.execute(
+				'''
 				SELECT first_name, last_name, user_pass, email, hex(employer_id) AS user_id, company FROM Employer
 					WHERE (email = %(email)s AND delete_flag = 0);
 				''',
@@ -482,7 +510,7 @@ async def login(request: Request, email, passwd, table):
 			raise CustomException(status_code=500, error='failed login', detail='user logging in')
 		if not users:
 			raise CustomException(status_code=500, error='failed login', detail='user not found')
-		db_password = users[2].encode()
+		db_password = users['user_pass'].encode()
 		#hashed_password = 
 		compare = bcrypt.checkpw(passwd, db_password)
 		if not compare:
@@ -490,17 +518,17 @@ async def login(request: Request, email, passwd, table):
 		payload: dict
 		if table == 'seeker':
 			payload = {
-				'user_id': users[4],
-				'email': users[3],
+				'user_id': users['user_id'],
+				'email': users['email'],
 				'company': None,
 				'type': table,
 				'exp': time_now + (60*60*24*7*2)
 			}
 		elif table == 'employer':
 			payload = {
-				'user_id': users[4],
-				'email': users[3],
-				'company': users[5],
+				'user_id': users['user_id'],
+				'email': users['email'],
+				'company': users['company'],
 				'type': table,
 				'exp': time_now + (60*60*24*7*2)
 			}
@@ -511,20 +539,20 @@ async def login(request: Request, email, passwd, table):
 			raise CustomException(status_code=500, error='failed login', detail='jwt failed')
 		if table == 'seeker':
 			return {
-				'id': users[4],
-				'email': users[3],
+				'id': users['user_id'],
+				'email': users['email'],
 				'company': None,
-				'firstName': users[0],
-				'lastName': users[1],
+				'firstName': users['first_name'],
+				'lastName': users['last_name'],
 				'jwt': encoded_user
 			}
 		elif table == 'employer':
 			return {
-				'id': users[4],
-				'email': users[3],
-				'company': users[5],
-				'firstName': users[0],
-				'lastName': users[1],
+				'id': users['user_id'],
+				'email': users['email'],
+				'company': users['company'],
+				'firstName': users['first_name'],
+				'lastName': users['last_name'],
 				'jwt': encoded_user
 			}
 	except Exception as err:

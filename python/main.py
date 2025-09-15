@@ -13,6 +13,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+import traceback # for testing
 
 # Request body is expected to be JSON or file
 
@@ -71,9 +72,9 @@ async def mysql_db_pooled_handler_middleware(req: Request, call_next):
 	new_time = datetime.datetime.now()
 	response = None
 	try:
-		db2 = pool.get_connection()
+		db2:mysql.pooling.PooledMySQLConnection = pool.get_connection()
 		if db2.is_connected():
-			req.state.cursor = db2.cursor(buffered=True)
+			req.state.cursor = db2.cursor(buffered=True, dictionary=True)
 			req.state.cursor.execute('SET SESSION sql_mode = "TRADITIONAL"')
 			req.state.cursor.execute('SET time_zone = "-8:00"')
 			response = await call_next(req)
@@ -304,6 +305,249 @@ async def login_employer(params: dict, request: Request, response: Response):
 			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
+# Search job postings endpoint
+@app.get('/job/search/get')
+@limiter.limit(limit_value='60/second')
+async def job_search_get(request: Request, response: Response, startIndex: int = 1, perPage: int = 10, key: str = None, loc: str = None, rem: str = None, ind: str = None, exp: str = None, emp: str = None, size: str = None, sal: str = None, ben: str = None, cert: str = None):
+	print('search attempt: jobs')
+	new_time = get_new_time()
+	write_log(f'{set_timestamp(new_time)} | | source: /job/search/get | info: get attempt: jobs | | @{get_remote_address(request)}\n')
+	keywords = None
+	location = None
+	remote = True
+	industry = None
+	experience_level = None
+	employment_type = None
+	company_size = None
+	salary_range = None
+	benefits = None
+	certifications = None
+	try:
+		args = {'start_index': startIndex, 'per_page': perPage}
+		search_query = 'SELECT job_id, company, city, state, is_remote, salary_low, salary_high, employment_type FROM Job WHERE (job_id >= %(start_index)s'
+		if rem == 'false':
+			remote = False
+		if remote:
+			search_query += ' AND is_remote = 1'
+		elif loc != None:
+			if not valid_san(loc):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid location')
+			search_query += ' AND city = %(city)s AND state = %(state)s'
+			location = loc.split('-')
+			if len(location) != 2:
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid location')
+			args['city'] = location[0]
+			args['state'] = location[1]
+		if ind != None:
+			if not valid_san(ind):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid industry')
+			search_query += ' AND industry = %(industry)s'
+			args['industry'] = industry
+		if exp != None:
+			if not valid_san(exp):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid experience level')
+			search_query += ' AND experience_level = %(experience_level)s'
+			args['experience_level'] = experience_level
+		if emp != None:
+			if not valid_san(emp):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid employment type')
+			search_query += ' AND employment_type = %(employment_type)s'
+			args['employment_type'] = employment_type
+		if sal != None:
+			low = 1
+			high = 999999
+			dash = False
+			try:
+				sal.index('-')
+				dash = True
+			except:
+				pass
+			if dash == True:
+				salary_range = sal.split('-')
+				exist = False
+				try:
+					valid_a(salary_range[0])
+					exist = True
+				except:
+					pass
+				if exist == True:
+					low = int(salary_range[0])
+					args['low'] = int(salary_range[0])
+					search_query += ' AND salary_low >= %(low)s'
+				high = int(salary_range[1])
+				args['high'] = int(salary_range[1])
+				search_query += ' AND salary_high <= %(high)s'
+			else:
+				low = int(sal)
+				args['low'] = int(sal)
+				search_query += ' AND salary_low >= %(low)s'
+			if not valid_n(low) or not valid_n(high):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='salary out of range')
+		if ben != None:
+			if not valid_san(ben):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid benefits')
+			dash = False
+			try:
+				ben.index('-')
+				dash = True
+			except:
+				pass
+			if dash == True:
+				benefits = ben.split('-')
+				for i in range(len(benefits)):
+					search_query += f' AND locate(%(ben{i})s, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+					args[f'ben{str(i)}'] = benefits[i]
+			else:
+				search_query += ' AND locate(%(benefits), JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+				args['benefits'] = ben
+		if cert != None:
+			if not valid_san(cert):
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid certifications')
+			dash = False
+			try:
+				cert.index('-')
+				dash = True
+			except:
+				pass
+			if dash == True:
+				certifications = cert.split('-')
+				for i in range(len(certifications)):
+					search_query += f' AND locate(%(cert{i})s, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+					args[f'cert{str(i)}'] = certifications[i]
+			else:
+				search_query += ' AND locate(%(certifications)s, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+				args['certifications'] = cert
+		if key != None:
+			query_str = ''
+			good = valid_kwargs(key)
+			if not good:
+				raise CustomException(status_code=400, error='failed get attempt: jobs', detail='malformed query')
+			quote = False
+			try:
+				key.index('"')
+				quote = True
+			except:
+				pass
+			if quote == True:
+				substr: list = []
+				substrquote = key.split('"')
+				for i in range(len(substrquote)):
+					if not valid_san(substrquote[i], 1023) and substrquote[i] != '':
+						raise CustomException(status_code=400, error='failed get attempt: jobs', detail='malformed query')
+					if substrquote[i] == '':
+						continue
+					if i % 2 == 0:
+						space = False
+						try:
+							substrquote[i].index(' ')
+							space = True
+						except:
+							pass
+						if space == True:
+							temp = substrquote[i].split(' ')
+							for j in temp:
+								substr.append(j)
+						else:
+							substr.append(substrquote[i])
+					else:
+						temp = '+"' + substrquote[i] + '"'
+						substr.append(temp)
+				print(substr)
+				for i in range(len(substr)):
+					if len(substr[i]) == 0:
+						continue
+					if not i + 1 >= len(substr):
+						substr[i] += ' '
+					query_str += substr[i]
+			else:
+				if not valid_san(key, 2047):
+					raise CustomException(status_code=400, error='failed get attempt: jobs', detail='malformed query')
+				query_str = key
+			search_query += ' AND MATCH (title, job_description, company, industry, experience_level, employment_type) AGAINST (%(keywords)s IN BOOLEAN MODE)'
+			args['keywords'] = query_str
+		search_query += ') LIMIT %(per_page)s;'
+		request.state.cursor.execute(search_query, args)
+		jobs = request.state.cursor.fetchall()
+		write_log(f'${set_timestamp(new_time)} | status: 200 | source: /job/search/get | success: search successful | | @${get_remote_address(request)}\n')
+		return JSONResponse(status_code=200, content={'success': True, 'jobs': jobs})
+	except Exception as err:
+		print(err)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+# Get job details
+@app.get('/job/{job_id}/get')
+@limiter.limit(limit_value='100/second')
+async def get_job_details(job_id, request: Request, response: Response):
+	new_time = get_new_time()
+	write_log(f'{set_timestamp(new_time)} | | source: /job/{job_id}/get | info: get attempt: job | | attempt: @${get_remote_address(request)}\n')
+	try:
+		request.state.cursor.execute(
+			'''
+			SELECT CASE
+				WHEN EXISTS(
+					SELECT 1
+					FROM Job
+					WHERE (job_id = %(job_id)s))
+				THEN(
+					SELECT delete_flag
+					FROM Job
+					WHERE job_id = %(job_id)s)
+				ELSE NULL
+			END AS exist;
+			''',{
+				'job_id': job_id
+			}
+		)
+		exist = request.state.cursor.fetchall()[0]['exist']
+		match exist:
+			case 0:
+				pass
+			case 1 | None:
+				raise CustomException(status_code=404, error='failed job get', detail='job not found')
+			case _:
+				raise CustomException(status_code=500, error='failed job get', detail='search defaulted')
+		request.state.cursor.execute(
+			'''
+			SELECT title, company, city, state, is_remote, industry, website, experience_level, employment_type, company_size, salary_low, salary_high, benefits, certifications, job_description, questions, date_created, expires, date_expires
+			FROM Job
+			WHERE job_id = %(job_id)s;
+			''',{
+				'job_id': job_id
+			}
+		)
+		[job] = request.state.cursor.fetchall()
+		dat:datetime.datetime = job['date_created']
+		date_iso = dat.isoformat()
+		job['date_created'] = date_iso
+		if job['expires'] == 1:
+			dat:datetime.datetime = job['date_expires']
+			date_iso = dat.isoformat()
+			job['date_expires'] = date_iso
+		write_log(f'{set_timestamp(new_time)} | status: 200 | source: /job/{job_id}/get | success: got job {job_id} | | @{get_remote_address(request)}\n')
+		return JSONResponse(status_code=200, content={'success': True, 'job': job})
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
 @app.post('/resume')
 @limiter.limit(limit_value='12/minute')
 async def resume(params: dict, request: Request, response: Response):
@@ -312,14 +556,30 @@ async def resume(params: dict, request: Request, response: Response):
 @app.post('/add')
 @limiter.limit(limit_value='5/minute')
 async def add(params: dict, request: Request, response: Response):
-	print(params)
-	date1 = params["date1"]
-	date2 = params["date2"]
-	valid = valid_dates(date1, date2)
-	valid2 = valid_exp_date(date2)
-	print(valid, valid2)
-	
-	return params
+	bob(1)
+	ben = 'good-okay'
+	args = {}
+	search_query = ''
+	if not valid_san(ben):
+		raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid benefits')
+	dash = False
+	try:
+		ben.index('-')
+		dash = True
+	except:
+		pass
+	if dash == True:
+		benefits = ben.split('-')
+		for i in range(len(benefits)):
+			bob(i)
+			search_query += f' AND locate(%(ben{i})s, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+			bob(i)
+			args[f'ben{str(i)}'] = benefits[i]
+	else:
+		search_query += ' AND locate(:benefits, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
+		args['benefits'] = ben
+	print(search_query)
+	return JSONResponse(status_code=200, content='good')
 
 #@app.post('/add-file')
 #async def add_file()
