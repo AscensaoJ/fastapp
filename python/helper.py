@@ -8,6 +8,7 @@ import magic
 import mimetypes
 import os
 from fastapi import Request
+from fastapi.security import HTTPBearer
 from slowapi.util import get_remote_address
 from starlette.responses import JSONResponse, Response
 from slowapi.errors import RateLimitExceeded
@@ -126,8 +127,37 @@ async def check_user(request: Request, e_mail: str):
 			write_log(f'{set_timestamp(new_time)} | | source: helper.check_user | error: ${err} | | server\n')
 		return err
 	
-def check_auth():
-	pass
+def check_auth(req: Request, user_id: str, company: str):
+	new_time = get_new_time()
+	try:
+		req.state.cursor.execute(
+			'''
+			SELECT approve_flag, company FROM employer
+        WHERE employer_id = UNHEX(%(id)s);
+			''',{
+				'id': user_id
+			}
+		)
+		[check] = req.state.cursor.fetchall()
+		if check['approve_flag'] != 1 and company != check['company']:
+			return False
+		else:
+			return True
+	except Exception as err:
+		print(err)
+		#traceback.print_exc()
+		error = str(err)
+		write_log(f'{set_timestamp(new_time)} | | source: helper.check_auth | error: {error} | | server\n')
+		raise err
+
+# def check_jwt(req: Request):
+# 	print('Verify attempt: JWT')
+# 	new_time = get_new_time()
+# 	write_log(f'{set_timestamp(new_time)} | | source: JWT | info: verify attempt: JWT | | attempt: @@{get_remote_address(req)}\n')
+# 	if not 'Authorization' in req.headers:
+# 		return CustomException(status_code=400, error='failed JWT verify', detail='invalid authorization, no authorization headers')
+	
+# 	return True
 
 # Check if log file exists, creates one if it does not
 def check_log():
@@ -415,8 +445,7 @@ def valid_kwargs(check: str):
 def unix_timestamp(date):
 	new_time = datetime.datetime.now()
 	try:
-		return True
-		#int(new_time.timestamp() * 1000)
+		return int(new_time.timestamp())
 	except Exception as err:
 		print(err)
 		write_log(f'{set_timestamp(new_time)} | | source: helper.unix_timestamp | error: ${err} | | server\n')
@@ -471,6 +500,35 @@ def limit_handler(ip, endpoint):
 	print(ip, 'hi')
 	return 'Too many requests'
 
+def get_path_desc(path: str):
+	match path:
+		case '/':
+			return 'root check'
+		case '/register/seeker':
+			return 'registration attempt: seeker'
+		case '/register/employer':
+			return 'registration attempt: employer'
+		case '/login/seeker':
+			return 'login attempt: seeker'
+		case '/login/employer':
+			return 'login attempt: employer'
+		case '/job/search/get':
+			return 'get attempt: jobs'
+		case _:
+			return 'other attempt'
+
+def get_email(req_body: str):
+	try:
+		email: str = ''
+		if 'email' in req_body:
+			if not valid_san(req_body['email']):
+				raise Exception()
+			email = req_body['email']
+		return email
+	except:
+		return ''
+			
+
 async def get_user(req: Request):
 	new_time = datetime.datetime.now()
 	params: dict
@@ -483,9 +541,11 @@ async def get_user(req: Request):
 		print(err)
 		write_log(f'{set_timestamp(new_time)} | | source: helper.get_user| error: ${err} | | server\n')
 		return err
-	
+
+
+
 async def login(request: Request, email, passwd, table):
-	time_now = unix_timestamp(get_new_time()) / 1000
+	time_now = unix_timestamp(get_new_time())
 	try:
 		users = None
 		if table == 'seeker':
@@ -570,9 +630,9 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
 	"""
 	user = await get_user(request)
 	if not user:
-		write_log(f'{set_timestamp(datetime.datetime.now())} | status: 429 | source: {request.url} | error: Too Many Requests | | @{get_remote_address(request)}')
+		write_log(f'{set_timestamp(datetime.datetime.now())} | status: 429 | source: {request.url.components.path} | error: Too Many Requests | | @{get_remote_address(request)}')
 	else:
-		write_log(f'{set_timestamp(datetime.datetime.now())} | status: 429 | source: {request.url} | error: Too Many Requests | | {user}@{get_remote_address(request)}')
+		write_log(f'{set_timestamp(datetime.datetime.now())} | status: 429 | source: {request.url.components.path} | error: Too Many Requests | | {user}@{get_remote_address(request)}')
 	response = JSONResponse(
 			{"error": f"Rate limit exceeded: {exc.detail}"}, status_code=429
 	)

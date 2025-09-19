@@ -1,5 +1,5 @@
 from typing import Annotated, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response, requests
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Response, Security, Header, Path, Query, Body
 from fastapi.responses import JSONResponse
 from python.helper import *
 from contextlib import asynccontextmanager
@@ -13,7 +13,10 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
 import traceback # for testing
+from fastapi.security import OAuth2PasswordBearer
+import json
 
 # Request body is expected to be JSON or file
 
@@ -33,7 +36,43 @@ pool = mysql.pooling.MySQLConnectionPool(
 	pool_name='mypool',
 	pool_size=10,
 	**db
-) 
+)
+
+# bearer = HTTPBearer()
+
+async def check_jwt(Authorization: Annotated[str | None, Header()] = None):
+	print('Verify attempt: JWT')
+	new_time = get_new_time()
+	write_log(f'{set_timestamp(new_time)} | | source: JWT | info: verify attempt: JWT | | attempt\n')
+	try:
+		if Authorization == None:
+			raise CustomException(status_code=400, error='failed JWT verify', detail='invalid authorization, no authorization headers')
+		arr = Authorization.split(' ')
+		if arr[0] != 'Bearer' or arr[1] == '':
+			raise CustomException(status_code=400, error='failed JWT verify', detail='invalid authorization, invalid authorization scheme')
+		try:
+			user = jwt.decode(jwt=arr[1], key=jwt_key, algorithms='HS256')
+			if not 'user_id' in user or not 'email' in user or not 'type' in user or not 'exp' in user:
+				raise CustomException(status_code=400, error='failed JWT verify', detail='invalid authorization, invalid contents')
+			email = user['email']
+			write_log(f'{set_timestamp(new_time)} | | source: JWT | info: verified: JWT | | {email}\n')
+			return user
+		except Exception as err:
+			msg = str(err)
+			raise CustomException(status_code=400, error='failed JWT verify', detail=msg)
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: JWT | error: {err.error} | reason: {err.detail} |\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: JWT | error: {err.error} | reason: {err.detail} |\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: JWT | error: {err} | |\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
 
 # Startup and shut down function, yield is separator
 @asynccontextmanager
@@ -72,11 +111,14 @@ async def mysql_db_pooled_handler_middleware(req: Request, call_next):
 	new_time = datetime.datetime.now()
 	response = None
 	try:
+		# req_body = await req.json()
+		# write_log(f'{set_timestamp(new_time)} | | source: {req.url.components.path} | info: {get_path_desc(req.url.components.path)} | | attempt: {get_email(req_body)}@{get_remote_address(req)}\n')
 		db2:mysql.pooling.PooledMySQLConnection = pool.get_connection()
 		if db2.is_connected():
 			req.state.cursor = db2.cursor(buffered=True, dictionary=True)
 			req.state.cursor.execute('SET SESSION sql_mode = "TRADITIONAL"')
 			req.state.cursor.execute('SET time_zone = "-8:00"')
+			req.state.db = db2
 			response = await call_next(req)
 
 	except Exception as err:
@@ -536,7 +578,136 @@ async def get_job_details(job_id, request: Request, response: Response):
 		return JSONResponse(status_code=200, content={'success': True, 'job': job})
 	except Exception as err:
 		print(err)
-		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.post('/forgot-password')
+@limiter.limit(limit_value='12/hour')
+async def forgot_password(params: dict, request: Request, response:Response):
+	return JSONResponse(status_code=200, content={'success': True, 'info': 'not yet implemented'})
+
+@app.post('/job/add')
+@limiter.limit(limit_value='5/minute')
+async def add_job(params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	new_time = get_new_time()
+	new_timestamp = unix_timestamp(new_time)
+	try:
+		if user['type'] != 'employer':
+			raise CustomException(status_code=403, error='failed job add', detail='forbidden')
+		print('Add attempt: job')
+		email = user['email']
+		write_log(f'{set_timestamp(new_time)} | | source: /job/add | info: add attempt: job | | attempt: {email}@{get_remote_address(request)}\n')
+		# Input check and validation, must send null for empty or unused values
+		if not 'title' in params or not 'city' in params or not 'state' in params or not 'isRemote' in params or not 'experienceLevel' in params or not 'employmentType' in params or not 'companySize' in params or not 'salaryLow' in params or not 'salaryHigh' in params or not 'jobDescription' in params or not 'expDate' in params or not 'questions' in params:
+			raise CustomException(status_code=403, error='failed job add', detail='missing field')
+		is_remote = params['isRemote']
+		title = params['title']
+		city = params['city']
+		state = params['state']
+		experience_level = params['experienceLevel']
+		employment_type = params['employmentType']
+		company_size = params['companySize']
+		salary_low = params['salaryLow']
+		salary_high = params['salaryHigh']
+		benefits = params['benefits']
+		certifications = params['certifications']
+		job_description = params['jobDescription']
+		exp_date = params['expDate']
+		questions = params['questions']
+		valid_exp_dates = valid_exp_date(exp_date)
+		if not valid_san(title, 255) or not valid_a(city, 255) or not valid_state(state) or not valid_a(experience_level, 255) or not valid_san(employment_type, 255) or not valid_san(company_size, 255) or not valid_n(salary_low) or not valid_n(salary_high) or not valid_json(benefits) or not valid_json(certifications) or not valid_san(job_description, 600) or not valid_json(questions) or not valid_exp_dates == True or not type(is_remote) == bool:
+			raise CustomException(status_code=400, error='failed job add', detail='invalid input')
+		# Check if user authorized to add job
+		check: bool
+		try:
+			check = check_auth(request, user['user_id'], user['company'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
+		if check == False:
+			raise CustomException(status_code=403, error='failed job add', detail='failed approval')
+		# Get employer info and add job to database
+		try:
+			request.state.cursor.execute(
+				'SELECT industry, website FROM Employer WHERE employer_id = UNHEX(%(user_id)s);',
+				{'user_id': user['user_id']}
+			)
+			employer = request.state.cursor.fetchone()
+			ben_json = None
+			if benefits != None:
+				ben_json = json.dumps(benefits, separators=(',', ':'))
+			cert_json = None
+			if certifications != None:
+				cert_json = json.dumps(certifications, separators=(',', ':'))
+			ques_json = None
+			if questions != None:
+				ques_json = json.dumps(questions, separators=(',', ':'))
+			expire = False
+			exp_date_f = None
+			new_time_f = new_time.strftime('%Y-%m-%d %H:%M:%S')
+			if exp_date != None:
+				expire = True
+				arr = str.split(exp_date, '-')
+				exp = datetime.datetime(int(arr[0]), int(arr[1]), int(arr[2]))
+				exp_date_f = exp.strftime('%Y-%m-%d %H:%M:%S')
+			request.state.cursor.execute(
+				'''
+				INSERT INTO Job (title, company, city, state, is_remote, industry, website, experience_level, employment_type, company_size, salary_low, salary_high, benefits, certifications, job_description, questions, employer_id, date_created, expires, date_expires)
+        VALUES (%(title)s, %(company)s, %(city)s, %(state)s, %(is_remote)s, %(industry)s, %(website)s, %(experience_level)s, %(employment_type)s, %(company_size)s, %(salary_low)s, %(salary_high)s, %(benefits)s, %(certifications)s, %(job_description)s, %(questions)s, UNHEX(%(employer_id)s), %(date_created)s, %(expires)s, %(date_expires)s);
+				'''
+			,{
+				'title': title,
+        'company': user['company'],
+        'city': city,
+        'state': state,
+        'is_remote': is_remote,
+        'industry': employer['industry'],
+        'website': employer['website'],
+        'experience_level': experience_level,
+        'employment_type': employment_type,
+        'company_size': company_size,
+        'salary_low': salary_low,
+        'salary_high': salary_high,
+        'benefits': ben_json,
+        'certifications': cert_json,
+        'job_description': job_description,
+        'questions': ques_json,
+        'employer_id': user['user_id'],
+        'date_created': new_time_f,
+        'expires': expire,
+        'date_expires': exp_date_f
+			})
+			request.state.db.commit()
+			request.state.cursor.execute(
+				'''
+				SELECT job_id FROM Job 
+        WHERE employer_id = UNHEX(%(user_id)s)
+        ORDER BY date_created DESC
+        LIMIT 1;
+				''',{
+					'user_id': user['user_id']
+				}
+			)
+			job_id = request.state.cursor.fetchall()
+			print(job_id)
+			# email = user['email']
+			# company = user['company']
+			# job = job_id['job_id']
+			# write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/add | success: {email} @ {company} added job id: {job} | | @{get_remote_address(request)}\n')
+			return JSONResponse(status_code=201, content={'success': True})#, 'jobId': job})
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error='failed job add', detail=errstr)
+	except Exception as err:
+		print(err)
 		if type(err) == CustomException:
 			if err.status_code == 500:
 				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
@@ -553,33 +724,83 @@ async def get_job_details(job_id, request: Request, response: Response):
 async def resume(params: dict, request: Request, response: Response):
 	pass
 
-@app.post('/add')
+@app.post('/add') # for testing
 @limiter.limit(limit_value='5/minute')
-async def add(params: dict, request: Request, response: Response):
-	bob(1)
-	ben = 'good-okay'
-	args = {}
-	search_query = ''
-	if not valid_san(ben):
-		raise CustomException(status_code=400, error='failed get attempt: jobs', detail='invalid benefits')
-	dash = False
+async def add(params: dict, request: Request, response: Response):#, user: Annotated[dict, Security(check_jwt)]):
+	new_time = get_new_time()
 	try:
-		ben.index('-')
-		dash = True
-	except:
-		pass
-	if dash == True:
-		benefits = ben.split('-')
-		for i in range(len(benefits)):
-			bob(i)
-			search_query += f' AND locate(%(ben{i})s, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
-			bob(i)
-			args[f'ben{str(i)}'] = benefits[i]
-	else:
-		search_query += ' AND locate(:benefits, JSON_EXTRACT(job.benefits, "$[*]")) > 0'
-		args['benefits'] = ben
-	print(search_query)
-	return JSONResponse(status_code=200, content='good')
+		# user = check_jwt(request)
+		# print(type(user))
+		# if type(user) == CustomException:
+		# 	raise CustomException(status_code=user.status_code, error=user.error, detail=user.detail)
+		is_remote = params['isRemote']
+		title = params['title']
+		city = params['city']
+		state = params['state']
+		experience_level = params['experienceLevel']
+		employment_type = params['employmentType']
+		company_size = params['companySize']
+		salary_low = params['salaryLow']
+		salary_high = params['salaryHigh']
+		benefits = params['benefits']
+		certifications = params['certifications']
+		job_description = params['jobDescription']
+		exp_date = params['expDate']
+		questions = params['questions']
+		valid_exp_dates = valid_exp_date(exp_date)
+		if not valid_san(title, 255):
+			bob(1)
+		if not valid_a(city, 255):
+			bob(2)
+		if not valid_state(state):
+			bob(3)
+		if not valid_a(experience_level, 255):
+			bob(4)
+		if not valid_san(employment_type, 255):
+			bob(5)
+		if not valid_san(company_size, 255):
+			bob(6)
+		if not valid_n(salary_low):
+			bob(7)
+		if not valid_n(salary_high):
+			bob(8)
+		if not valid_json(benefits):
+			bob(9)
+		if not valid_json(certifications):
+			bob(10)
+		if not valid_san(job_description, 600):
+			bob(11)
+		if not valid_json(questions):
+			bob(12)
+		if not valid_exp_dates == True:
+			bob(13)
+		if not type(is_remote) == bool:
+			bob(14)
+		bob('good')
+		return JSONResponse(status_code=200, content='good')
+	except Exception as err:
+		print(type(err))
+		traceback.print_exc()
+		if isinstance(err, Exception):
+			bob(1)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+# from fastapi.security import OAuth2PasswordBearer
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="Bearer")
+
+
+# @app.get("/items/")
+# async def read_items(token: Annotated[str, Security(oauth2_scheme)]):
+#     return {"token": token}
 
 #@app.post('/add-file')
 #async def add_file()
