@@ -1,0 +1,1 @@
+For unknown reasons python-magic-bin does not install properly from requirements.txt using pip, please install manually

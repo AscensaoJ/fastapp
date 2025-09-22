@@ -27,12 +27,6 @@ try {
   console.error("Error fetching and saving jobs:", error);
 }
 
-const corsOptions = {
-  origin: 'http://localhost:5173', 
-  credentials: true,
-  optionSuccessStatus: 200,
-}
-
 const time = new Date(Date.now());// used to log server start
 const writer = fs.createWriteStream('./ape.log', {flags: 'a'});// open log for appending, creates file if it does not exist
 
