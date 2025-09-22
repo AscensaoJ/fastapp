@@ -304,11 +304,9 @@ def valid_state(check):
 
 # JSON, API request body is expected to be JSON. FastAPI auto-converts to dictionary
 def valid_json(check):
-	if type(check) == str:
+	if type(check) == str or check == None:
 		return True
 	new_time = datetime.datetime.now()
-	if check == None:
-		return True
 	if type(check) != dict and type(check) != list:
 		print(type(check))
 		return False
@@ -320,9 +318,9 @@ def valid_json(check):
 		elif type(check) == list:
 			arr = list(check)
 		for entry in arr:
-			if type(entry) != str and type(entry) != dict and type(entry) != list and type(entry) != bool and type(entry) != int and type(entry) != float:
+			if type(entry) != str and type(entry) != dict and type(entry) != list and type(entry) != bool and type(entry) != int and type(entry) != float and entry != None:
 				return False
-		for entry in arr:
+		#for entry in arr:
 			if type(entry) == dict or type(entry) == list:
 				valid2 = valid_json(entry)
 				if not valid2:
@@ -349,14 +347,15 @@ def valid_date(check):
 		days = 1
 		if len(arr) == 3:
 			days = int(arr[2])
-		check_date = datetime.date(int(arr[0]), int(arr[1]), days)
+		checked_date = datetime.date(int(arr[0]), int(arr[1]), days)
 		max_date = datetime.date.today()
-		if max_date > check_date:
+		if max_date > checked_date:
 			return True
 		else:
 			return False
 	except Exception as err:
 		print(err)
+		traceback.print_exc()
 		write_log(f'{set_timestamp(new_time)} | | source: helper.valid_date | error: ${err} | | server\n')
 		return False
 

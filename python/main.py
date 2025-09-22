@@ -607,7 +607,7 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 		write_log(f'{set_timestamp(new_time)} | | source: /job/add | info: add attempt: job | | attempt: {email}@{get_remote_address(request)}\n')
 		# Input check and validation, must send null for empty or unused values
 		if not 'title' in params or not 'city' in params or not 'state' in params or not 'isRemote' in params or not 'experienceLevel' in params or not 'employmentType' in params or not 'companySize' in params or not 'salaryLow' in params or not 'salaryHigh' in params or not 'jobDescription' in params or not 'expDate' in params or not 'questions' in params:
-			raise CustomException(status_code=403, error='failed job add', detail='missing field')
+			raise CustomException(status_code=400, error='failed job add', detail='missing field')
 		is_remote = params['isRemote']
 		title = params['title']
 		city = params['city']
@@ -697,7 +697,6 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 				}
 			)
 			job_id = request.state.cursor.fetchall()
-			print(job_id)
 			# email = user['email']
 			# company = user['company']
 			# job = job_id['job_id']
@@ -719,64 +718,311 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
-@app.post('/resume')
+# Add resume endpoint
+@app.post('/resume/add')
 @limiter.limit(limit_value='12/minute')
-async def resume(params: dict, request: Request, response: Response):
-	pass
+async def add_resume(params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	print('Add attempt: resume')
+	new_time = get_new_time()
+	write_log(f'{set_timestamp(new_time)} | | source: /resume/add | info: add attempt: resume | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+	try:
+		# Input check and validation, send null for empty or unused fields
+		if not 'summary' in params or not 'education' in params or not 'experience' in params or not 'skill' in params or not 'link' in params or not 'publication' in params:
+			raise CustomException(status_code=400, error='failed resume add', detail='missing field')
+		summary = params['summary']
+		education = params['education']
+		experience = params['experience']
+		skill = params['skill']
+		link = params['link']
+		publication = params['publication']
+		if summary == None:
+			raise CustomException(status_code=400, error='failed resume add', detail='missing field')
+		if not valid_san(summary, 600):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(education):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(experience):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(skill):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(link):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(publication):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed resume add', detail=check['reason'])
+		sql_strs = []
+		entries = [0,0,0,0,0]
+		entries_total = 0
+		args = []
+		if education != None:
+			list_ed = education.values()
+			sql_str = "INSERT INTO Education (seeker_id, institution_name, education_level, education_field, date_start, date_end, present) VALUES(UNHEX(%(user_id)s), %(institution_name)s, %(education_level)s, %(education_field)s, %(date_start)s, %(date_end)s, %(present)s);"
+			date_end = None
+			if len(list_ed) > 2:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many education inputs')
+			valid: bool
+			i = 0
+			for entry in list_ed:
+				if not 'institutionName' in entry or not 'educationLevel' in entry or not 'educationField' in entry or not 'dateStart' in entry or type(entry['present']) != bool:
+					valid = False
+					break
+				if not valid_san(entry['institutionName'], 255) or not valid_san(entry['educationLevel'], 255) or not valid_san(entry['educationField'], 255) or not valid_date(entry['dateStart']):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				if entry['dateEnd'] == None and entry['present'] == False:
+					valid = False
+					break
+				if entry['dateEnd'] != None and entry['present'] == True:
+					valid = False
+					break
+				if entry['dateEnd'] != None and valid_date(entry['dateEnd']):
+					if not valid_dates(entry['dateStart'], entry['dateEnd']):
+						valid = False
+						break
+					else:
+						date = entry['dateEnd'].split('-')
+						date_end = datetime.date(int(date[0]), int(date[1]), 1)
+				valid = True		
+				date = entry['dateStart'].split('-')
+				date_start = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'institution_name': entry['institutionName'],
+					'education_level': entry['educationLevel'],
+					'education_field': entry['educationField'],
+					'date_start': date_start,
+					'date_end': date_end,
+					'present': entry['present']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid education input')
+			entries[0] = i
+			entries_total += i
+		if experience != None:
+			list_ex = experience.values()
+			sql_str = "INSERT INTO Experience (seeker_id, job_title, company_name, remote, address, city, state, date_start, date_end, present, job_description) VALUES(UNHEX(%(user_id)s), %(job_title)s, %(company_name)s, %(remote)s, %(address)s, %(city)s, %(state)s, %(date_start)s, %(date_end)s, %(present)s, %(job_description)s);"
+			date_end = None
+			if len(list_ex) > 3:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_ex:
+				if not 'jobTitle' in entry or not 'companyName' in entry or not 'address' in entry or not 'city' in entry or not 'state' in entry or not 'dateStart' in entry or type(entry['remote']) != bool or type(entry['present']) != bool or not 'jobDescription' in entry:
+					valid = False
+					break
+				if not valid_san(entry['jobTitle'], 255) or not valid_san(entry['companyName'], 255) or not valid_san(entry['city'], 255) or not valid_state(entry['state']) or not valid_date(entry['dateStart']):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				if entry['dateEnd'] == None and entry['present'] == False:
+					valid = False
+					break
+				if entry['dateEnd'] != None and entry['present'] == True:
+					valid = False
+					break
+				if entry['dateEnd'] != None and valid_date(entry['dateEnd']):
+					if not valid_dates(entry['dateStart'], entry['dateEnd']):
+						valid = False
+						break
+					else:
+						date = entry['dateEnd'].split('-')
+						date_end = datetime.date(int(date[0]), int(date[1]), 1)
+				if entry['address'] == None and entry['remote'] == False:
+					valid = False
+					break
+				if entry['address'] != None and entry['remote'] == True:
+					valid = False
+					break
+				if entry['jobDescription'] != None and not valid_san(entry['jobDescription'], 600):
+					valid = False
+					break
+				date = entry['dateStart'].split('-')
+				date_start = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'job_title': entry['jobTitle'],
+					'company_name': entry['companyName'],
+					'address': entry['address'],
+					'city': entry['city'],
+					'state': entry['state'],
+					'date_start': date_start,
+					'date_end': date_end,
+					'present': entry['present'],
+					'remote': entry['remote'],
+					'job_description': entry['jobDescription']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid experience input')
+			entries[1] = i
+			entries_total += i
+		if skill != None:
+			list_sk = skill.values()
+			sql_str = "INSERT INTO Skill (seeker_id, skill_name, skill_years) VALUES(UNHEX(%(user_id)s), %(skill_name)s, %(skill_years)s);"
+			if len(list_sk) > 25:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many skill inputs')
+			valid: bool
+			i = 0
+			for entry in list_sk:
+				if not 'skillName' in entry or not 'skillYears' in entry:
+					valid = False
+					break
+				if not valid_san(entry['skillName'], 255) or not valid_n(entry['skillYears']):
+					valid = False
+					break
+				if len(entry['skillName']) > 255 or len(entry['skillYears']) > 50 or len(entry['skillYears']) < 1:
+					valid = False
+					break
+				sql_args = {
+					'user_id': user['user_id'],
+					'skill_name': entry['skillName'],
+					'skill_years': entry['skillYears']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid skill input')
+			entries[2] = i
+			entries_total += i
+		if link != None:
+			list_lk = link.values()
+			sql_str = "INSERT INTO Url (seeker_id, link_name, link_url) VALUES(UNHEX(%(user_id)s), %(link_name)s, %(link_url)s);"
+			if len(list_lk) > 5:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_lk:
+				if not 'linkName' in entry or not 'linkUrl' in entry:
+					valid = False
+					break
+				if not valid_san(entry['linkName'], 255) or not valid_san(entry['linkUrl'], 2047):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				sql_args = {
+					'link_name': user['linkName'],
+					'link_url': entry['linkUrl']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid experience input')
+			entries[3] = i
+			entries_total += i
+		if publication != None:
+			list_pb = publication.values()
+			sql_str = "INSERT INTO Publication (seeker_id, publication_name, publication_url, publication_date, publication_summary) VALUES(UNHEX(%(user_id)s), %(publication_name)s, %(publication_url)s, %(publication_date)s, %(publication_summary)s);"
+			if len(list_ed) > 3:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_pb:
+				if not 'jobTitle' in entry or not 'pubName' in entry or not 'pubUrl' in entry or not 'pubDate' in entry or not 'pubSummary' in entry:
+					valid = False
+					break
+				if not valid_san(entry['pubName'], 255) or not valid_san(entry['pubUrl'], 2047) or not valid_date(entry['pubDate']) or not valid_san(entry['pubSummary'], 600):
+					valid = False
+					break
+				date = entry['pubDate'].split('-')
+				date_pub = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'publication_name': entry['pubName'],
+					'publication_url': entry['pubUrl'],
+					'publication_date': date_pub,
+					'publication_summary': entry['pubSummary']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid publication input')
+			entries[4] = i
+			entries_total += i
+		if len(sql_strs) != len(args) or len(args) != entries_total:
+			raise CustomException(status_code=500, error='failed resume add', detail='stings, args, entries miscount')
+		sql_strs.append('UPDATE Seeker SET summary = %(summary)s, education_entries = %(education_entries)s, experience_entries = %(experience_entries)s, skill_entries = %(skill_entries)s, link_entries = %(link_entries)s, publication_entries = %(publication_entries)s WHERE seeker_id = UNHEX(%(user_id)s);')
+		args.append({
+			'summary': summary,
+			'education_entries': entries[0],
+			'experience_entries': entries[1],
+			'skill_entries': entries[2],
+			'link_entries': entries[3],
+			'publication_entries': entries[4],
+			'user_id': user['user_id']
+		})
+		entries_total += 1
+		tables = ['Education', 'Experience', 'Skill', 'Url', 'Publication']
+		for entry in tables:
+			request.state.cursor.execute(
+				"DELETE "
+					f"FROM {entry} "
+					"WHERE seeker_id = UNHEX(%(user_id)s);"
+			,{
+				'user_id': user['user_id']
+			})
+		request.state.db.commit()
+		for i in range(entries_total):
+			sql_str = sql_strs[i]
+			sql_arg = args[i]
+			request.state.cursor.execute(sql_str, sql_arg)
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
 
 @app.post('/add') # for testing
 @limiter.limit(limit_value='5/minute')
 async def add(params: dict, request: Request, response: Response):#, user: Annotated[dict, Security(check_jwt)]):
 	new_time = get_new_time()
 	try:
-		# user = check_jwt(request)
-		# print(type(user))
-		# if type(user) == CustomException:
-		# 	raise CustomException(status_code=user.status_code, error=user.error, detail=user.detail)
-		is_remote = params['isRemote']
-		title = params['title']
-		city = params['city']
-		state = params['state']
-		experience_level = params['experienceLevel']
-		employment_type = params['employmentType']
-		company_size = params['companySize']
-		salary_low = params['salaryLow']
-		salary_high = params['salaryHigh']
-		benefits = params['benefits']
-		certifications = params['certifications']
-		job_description = params['jobDescription']
-		exp_date = params['expDate']
-		questions = params['questions']
-		valid_exp_dates = valid_exp_date(exp_date)
-		if not valid_san(title, 255):
-			bob(1)
-		if not valid_a(city, 255):
-			bob(2)
-		if not valid_state(state):
-			bob(3)
-		if not valid_a(experience_level, 255):
-			bob(4)
-		if not valid_san(employment_type, 255):
-			bob(5)
-		if not valid_san(company_size, 255):
-			bob(6)
-		if not valid_n(salary_low):
-			bob(7)
-		if not valid_n(salary_high):
-			bob(8)
-		if not valid_json(benefits):
-			bob(9)
-		if not valid_json(certifications):
-			bob(10)
-		if not valid_san(job_description, 600):
-			bob(11)
-		if not valid_json(questions):
-			bob(12)
-		if not valid_exp_dates == True:
-			bob(13)
-		if not type(is_remote) == bool:
-			bob(14)
-		bob('good')
+		
+		bib = '''INSERT INTO Education (seeker_id, institution_name, education_level, education_field, date_start, date_end, present)
+		VALUES(UNHEX(%(user_id)s), %(institution_name)s, %(education_level)s, %(education_field)s, %(date_start)s, %(date_end)s, %(present)s);'''
+		request.state.cursor.execute(
+			'INSERT INTO Experience (seeker_id, job_title, company_name, remote, address, city, state, date_start, date_end, present, job_description) VALUES((UNHEX(%(user_id)s), %(job_title)s, %(company_name)s, %(remote)s, %(address)s, %(city)s, %(state)s, %(date_start)s, %(date_end)s, %(present)s, %(job_description)s);', {
+				'user_id': '31439B7D1ECB11EFBC9600155D6BEAC7',
+				'job_title': 'intern',
+				'company_name': 'BVT',
+				'city': 'examples',
+				'state': 'CA',
+				'date_start': datetime.date(2001, 4, 1),
+				'date_end': None,
+				'present': True,
+				'remote': True,
+				'job_description': None
+				})
 		return JSONResponse(status_code=200, content='good')
 	except Exception as err:
 		print(type(err))
