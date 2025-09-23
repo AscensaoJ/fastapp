@@ -138,7 +138,7 @@ def check_auth(req: Request, user_id: str, company: str):
 				'id': user_id
 			}
 		)
-		[check] = req.state.cursor.fetchall()
+		check = req.state.cursor.fetchone()
 		if check['approve_flag'] != 1 and company != check['company']:
 			return False
 		else:

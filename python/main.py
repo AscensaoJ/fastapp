@@ -365,6 +365,8 @@ async def job_search_get(request: Request, response: Response, startIndex: int =
 	benefits = None
 	certifications = None
 	try:
+		if perPage > 100:
+			raise CustomException(status_code=400, error='failed get attempt: jobs', detail='jobs per page too high')
 		args = {'start_index': startIndex, 'per_page': perPage}
 		search_query = 'SELECT job_id, company, city, state, is_remote, salary_low, salary_high, employment_type FROM Job WHERE (job_id >= %(start_index)s'
 		if rem == 'false':
@@ -549,7 +551,7 @@ async def get_job_details(job_id, request: Request, response: Response):
 				'job_id': job_id
 			}
 		)
-		exist = request.state.cursor.fetchall()[0]['exist']
+		exist = request.state.cursor.fetchone()['exist']
 		match exist:
 			case 0:
 				pass
@@ -566,7 +568,7 @@ async def get_job_details(job_id, request: Request, response: Response):
 				'job_id': job_id
 			}
 		)
-		[job] = request.state.cursor.fetchall()
+		job = request.state.cursor.fetchone()
 		dat:datetime.datetime = job['date_created']
 		date_iso = dat.isoformat()
 		job['date_created'] = date_iso
@@ -696,7 +698,7 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 					'user_id': user['user_id']
 				}
 			)
-			job_id = request.state.cursor.fetchall()
+			job_id = request.state.cursor.fetchone()
 			# email = user['email']
 			# company = user['company']
 			# job = job_id['job_id']
@@ -989,16 +991,124 @@ async def add_resume(params: dict, request: Request, response: Response, user: A
 			request.state.cursor.execute(sql_str, sql_arg)
 	except Exception as err:
 		print(err)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume/add | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /resume/add | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume/add | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.get('/resume')
+@limiter.limit('40/minute')
+async def get_resume(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	new_time = get_new_time()
+	print('Get attempt: resume')
+	write_log(f'{set_timestamp(new_time)} | | source: /resume | info: get attempt: resume | | {user["email"]}@{get_remote_address(request)}\n')
+	try:
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed get attempt: resume', detail=check['reason'])
+		request.state.cursor.execute(
+			'''
+				SELECT first_name, last_name, email, summary
+				FROM Seeker
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		seeker = request.state.cursor.fetchone()
+		request.state.cursor.execute(
+			'''
+				SELECT institution_name, education_level, education_field, date_start, date_end, present
+        FROM Education
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		education = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT job_title, company_name, address, city, state, date_start, date_end,  present, remote, job_description
+        FROM Experience
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		experience = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT skill_name, skill_years
+        FROM Skill
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		skill = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT link_name, link_url
+        FROM Url
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		link = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT publication_name, publication_url, publication_date, publication_summary
+        FROM Publication
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		publication = request.state.cursor.fetchall()
+		if education == []:
+			education = None
+		if experience == []:
+			experience = None
+		if skill == []:
+			skill = None
+		if link == []:
+			link = None
+		if publication == []:
+			publication = None
+		write_log(f'{set_timestamp(new_time)} | status: 200 | source: /resume | success: get attempt: resume | | @{get_remote_address(request)}\n')
+		response.status_code = 200
+		return {
+			'seeker': seeker,
+			'education': education,
+			'experience': experience,
+			'skill': skill,
+			'link': link,
+			'publication': publication
+		}
+	except Exception as err:
+		print(err)
 		traceback.print_exc()
 		if type(err) == CustomException:
 			if err.status_code == 500:
-				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail='Internal server error')
 			else:
-				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail=err.detail)
 		else:
-			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1007,23 +1117,8 @@ async def add_resume(params: dict, request: Request, response: Response, user: A
 async def add(params: dict, request: Request, response: Response):#, user: Annotated[dict, Security(check_jwt)]):
 	new_time = get_new_time()
 	try:
-		
-		bib = '''INSERT INTO Education (seeker_id, institution_name, education_level, education_field, date_start, date_end, present)
-		VALUES(UNHEX(%(user_id)s), %(institution_name)s, %(education_level)s, %(education_field)s, %(date_start)s, %(date_end)s, %(present)s);'''
-		request.state.cursor.execute(
-			'INSERT INTO Experience (seeker_id, job_title, company_name, remote, address, city, state, date_start, date_end, present, job_description) VALUES((UNHEX(%(user_id)s), %(job_title)s, %(company_name)s, %(remote)s, %(address)s, %(city)s, %(state)s, %(date_start)s, %(date_end)s, %(present)s, %(job_description)s);', {
-				'user_id': '31439B7D1ECB11EFBC9600155D6BEAC7',
-				'job_title': 'intern',
-				'company_name': 'BVT',
-				'city': 'examples',
-				'state': 'CA',
-				'date_start': datetime.date(2001, 4, 1),
-				'date_end': None,
-				'present': True,
-				'remote': True,
-				'job_description': None
-				})
-		return JSONResponse(status_code=200, content='good')
+		response.status_code = 201
+		return {'status_code':200, 'content':'good'}
 	except Exception as err:
 		print(type(err))
 		traceback.print_exc()
@@ -1050,11 +1145,11 @@ async def add(params: dict, request: Request, response: Response):#, user: Annot
 
 #@app.post('/add-file')
 #async def add_file()
-@app.get('/seeker')
-async def seeker(req: Request):
-	req.state.cursor.execute('select hex(seeker_id), email, delete_flag from seeker;')
-	print(req.state.cursor.fetchone())
-	print('henlo')
+# @app.get('/seeker')
+# async def seeker(req: Request):
+# 	req.state.cursor.execute('select hex(seeker_id), email, delete_flag from seeker;')
+# 	print(req.state.cursor.fetchone())
+# 	print('henlo')
 
 @app.post("/upload-image")
 @limiter.limit(limit_value='5/minute')
