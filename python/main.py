@@ -596,6 +596,9 @@ async def get_job_details(job_id, request: Request, response: Response):
 async def forgot_password(params: dict, request: Request, response:Response):
 	return JSONResponse(status_code=200, content={'success': True, 'info': 'not yet implemented'})
 
+
+# Access controlled endpoints
+
 @app.post('/job/add')
 @limiter.limit(limit_value='5/minute')
 async def add_job(params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
@@ -698,12 +701,12 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 					'user_id': user['user_id']
 				}
 			)
-			job_id = request.state.cursor.fetchone()
-			# email = user['email']
-			# company = user['company']
-			# job = job_id['job_id']
-			# write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/add | success: {email} @ {company} added job id: {job} | | @{get_remote_address(request)}\n')
-			return JSONResponse(status_code=201, content={'success': True})#, 'jobId': job})
+			job_id = request.state.cursor.fetchone()['job_id']
+			print(job_id)
+			email = user['email']
+			company = user['company']
+			write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/add | success: {email} @ {company} added job id: {job_id} | | @{get_remote_address(request)}\n')
+			return JSONResponse(status_code=201, content={'success': True, 'jobId': job_id})
 		except Exception as err:
 			errstr = str(err)
 			raise CustomException(status_code=500, error='failed job add', detail=errstr)
@@ -1007,8 +1010,8 @@ async def add_resume(params: dict, request: Request, response: Response, user: A
 async def get_resume(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
 	new_time = get_new_time()
 	print('Get attempt: resume')
-	write_log(f'{set_timestamp(new_time)} | | source: /resume | info: get attempt: resume | | {user["email"]}@{get_remote_address(request)}\n')
 	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /resume | info: get attempt: resume | | {user["email"]}@{get_remote_address(request)}\n')
 		check: dict
 		try:
 			check = await check_user(request, user['email'])
@@ -1111,6 +1114,104 @@ async def get_resume(request: Request, response: Response, user: Annotated[dict,
 			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
+@app.post('/job/apply/{job_id}/submit')
+@limiter.limit(limit_value='1/second')# 1/minute
+async def apply(job_id: int, params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	print('add attempt: application')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/apply/{job_id}/submit | info: add attempt: application | | attempt: {user["email"]}@{get_remote_address(request)}')
+		# Get and validate input
+		answers = params['answers']
+		if not valid_json(answers):
+			raise CustomException(status_code=400, error='failed application add', detail='invalid input')
+		# Ensure all question are answered
+		questions: dict
+		request.state.cursor.execute(
+			'''
+			SELECT questions
+			FROM job
+			WHERE job_id = %(job_id)s;
+			''',{
+				'job_id': job_id
+			}
+		)
+		ques_holder = request.state.cursor.fetchone()['questions']
+		questions = None
+		if ques_holder != None:
+			questions = json.loads(ques_holder)
+		if questions == None and answers != None:
+			raise CustomException(status_code=400, error='failed application add', detail='answers with no questions')
+		if questions != None:
+			if answers == None or len(answers) < len(questions):
+				raise CustomException(status_code=400, error='failed application add', detail='questions with no answers')
+			if len(answers) > len(questions):
+				raise CustomException(status_code=400, error='failed application add', detail='too many answers')
+		# Check if seeker has previously applied to job
+		request.state.cursor.execute(
+			'''
+			SELECT CASE
+			WHEN EXISTS (
+				SELECT 1 FROM Application
+				WHERE (job_id = %(job_id)s AND seeker_id = UNHEX(%(seeker_id)s))
+			)
+			THEN (
+				SELECT job_id FROM Application
+				WHERE (job_id = %(job_id)s AND seeker_id = UNHEX(%(seeker_id)s))
+			)
+			ELSE NULL
+			END AS job_id
+			FROM Application;
+			''',{
+				'job_id': job_id,
+				'seeker_id': user['user_id']
+			}
+		)
+		check_repeat = request.state.cursor.fetchone()
+		if check_repeat['job_id'] != None:
+			raise CustomException(status_code=400, error='failed application add', detail='already applied')
+		# Check if user exists and is valid to apply
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed application add', detail=check['reason'])
+		if check['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed application add', detail='wrong user type')
+		answers_formatted = None
+		if answers != None:
+			answers_formatted = json.dumps(answers, separators=(',', ':'))
+		request.state.cursor.execute(
+			'''
+			INSERT INTO Application(seeker_id, job_id, answers)
+      VALUE(UNHEX(%(seeker_id)s), %(job_id)s, %(answers)s);
+			''',{
+				'seeker_id': user['user_id'],
+				'job_id': job_id,
+				'answers': answers_formatted
+			}
+		)
+		write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/apply | success: application added | | @{get_remote_address(request)}\n')
+		return JSONResponse(status_code=201, content={'message': 'application submitted'})
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/apply/{job_id}/submit | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/apply/{job_id}/submit | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/apply/{job_id}/submit | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+
+	# return {'implemented': False}
 
 @app.post('/add') # for testing
 @limiter.limit(limit_value='5/minute')
