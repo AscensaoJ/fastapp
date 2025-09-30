@@ -1210,6 +1210,127 @@ async def apply(job_id: int, params: dict, request: Request, response: Response,
 			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/apply/{job_id}/submit | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
+@app.get('/job/applied')
+@limiter.limit(limit_value='5/second')
+async def applied(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], startIndex: int = 1, perPage: int = 10):
+	print('Get attempt: jobs applied')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applied | info: get attempt: jobs applied | | attempt: @{get_remote_address(request)}\n')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applied get', detail=check['reason'])
+		if check['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed applied get', detail='wrong user type')
+		request.state.cursor.execute(
+			'''
+			SELECT title, date_applied, questions, answers, seen, accepted, rejected
+			FROM Application INNER JOIN Job
+			ON Job.job_id = Application.job_id
+			WHERE (app_index >= %(start_index)s AND Application.seeker_id = UNHEX(%(user_id)s) AND Job.delete_flag = 0)
+			ORDER BY date_applied DESC
+			LIMIT %(per_page)s;
+			''',{
+				'user_id': user['user_id'],
+				'start_index': startIndex,
+				'per_page': perPage
+			}
+		)
+		apps = request.state.cursor.fetchall()
+		response.status_code = 200
+		return apps
+	except Exception as err:
+		print(type(err))
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applied | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applied | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applied | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+# Get current applications for user's company
+@app.get('/job/applications')
+@limiter.limit('5/second')
+async def application(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], endIndex: int = 0, perPage: int = 10):
+	print('Get attempt: applications')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applications | info: get attempt: applications | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+		if perPage >100:
+			raise CustomException(status_code=400, error='failed applications get', detail='applications per page too high')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applications get', detail=check['reason'])
+		if check['usertype'] != 'employer':
+			raise CustomException(status_code=400, error='failed applications get', detail='wrong user type')
+		check: bool
+		try:
+			check = check_auth(request, user['user_id'], user['company'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
+		if check == False:
+			raise CustomException(status_code=403, error='failed job add', detail='failed approval')
+		if endIndex == 0:
+			request.state.cursor.execute(
+				'''
+				SELECT HEX(Seeker.seeker_id) AS user_id, email, Job.job_id, app_index, title, first_name, last_name, seen, accepted, rejected
+				FROM Application INNER JOIN (Seeker, Job)
+				ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+				WHERE (Job.company = %(company)s AND Seeker.delete_flag = 0 AND Job.delete_flag = 0)
+				ORDER BY date_applied DESC
+				LIMIT %(per_page)s;
+				''',{
+					'company': user['company'],
+					'per_page': perPage
+				}
+			)
+		else:
+			request.state.cursor.execute(
+				'''
+				SELECT HEX(Seeker.seeker_id) AS user_id, email, Job.job_id, app_index, title, first_name, last_name, seen, accepted, rejected
+				FROM Application INNER JOIN (Seeker, Job)
+				ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+				WHERE (Job.company = %(company)s AND Seeker.delete_flag = 0 AND Job.delete_flag = 0 AND app_index < %(end_index)s)
+				ORDER BY date_applied DESC
+				LIMIT %(per_page)s;
+				''',{
+					'company': user['company'],
+					'end_index': endIndex,
+					'per_page': perPage
+				}
+			)
+		appls = request.state.cursor.fetchall()
+		response.status_code = 200
+		
+		return {'success': True, 'apps': appls}
+	except Exception as err:
+		print(type(err))
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
 
 	# return {'implemented': False}
 
