@@ -1284,8 +1284,8 @@ async def application(request: Request, response: Response, user: Annotated[dict
 			errstr = str(err)
 			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
 		if check == False:
-			raise CustomException(status_code=403, error='failed job add', detail='failed approval')
-		if endIndex == 0:
+			raise CustomException(status_code=403, error='failed applications get', detail='failed approval')
+		if endIndex == 0: # first page, because why pass (2^32)-1
 			request.state.cursor.execute(
 				'''
 				SELECT HEX(Seeker.seeker_id) AS user_id, email, Job.job_id, app_index, title, first_name, last_name, seen, accepted, rejected
@@ -1320,17 +1320,181 @@ async def application(request: Request, response: Response, user: Annotated[dict
 		return {'success': True, 'apps': appls}
 	except Exception as err:
 		print(type(err))
-		traceback.print_exc()
 		if type(err) == CustomException:
 			if err.status_code == 500:
-				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail='Internal server error')
 			else:
-				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /login/employer | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applications | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
 				raise HTTPException(status_code=err.status_code, detail=err.detail)
 		else:
-			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
+
+# Get resume attached to specific application
+@app.get('/job/applications/resume')
+@limiter.limit(limit_value='5/second')
+async def apps_resume(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], appIndex: int, email: str):
+	print('Get attempt: applicant resume')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applications/resume | info: get attempt: applicant resume | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+		if not valid_san(email, 255):
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='invalid applicant email')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applicant resume get', detail=check['reason'])
+		if check['usertype'] != 'employer':
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='wrong user type')
+		check: bool
+		try:
+			check = check_auth(request, user['user_id'], user['company'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
+		if check == False:
+			raise CustomException(status_code=403, error='failed applicant resume get', detail='failed approval')
+		# Get applicant user info
+		applicant: dict
+		try:
+			applicant = await check_user(request, email)
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if applicant['exists'] == False:
+			raise CustomException(status_code=400, error='failed applicant resume get', detail=applicant['reason'])
+		if applicant['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='wrong user type')
+		# Check if resume was file upload
+		request.state.cursor.execute(
+			'''
+			SELECT CASE
+				WHEN EXISTS(SELECT 1
+					FROM Application INNER JOIN (Seeker, Job)
+					ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+					WHERE (Application.seeker_id = UNHEX(%(seeker_id)s) AND Job.company = %(company)s))
+				THEN(SELECT resume_uploaded
+					FROM Seeker
+					WHERE seeker_id = UNHEX(%(seeker_id)s))
+				ELSE NULL
+			END AS resume_uploaded;
+			''',{
+				'company': user['company'],
+				'seeker_id': applicant['userId']
+			}
+		)
+		resume_uploaded = request.state.cursor.fetchone()['resume_uploaded']
+		resume: dict
+		# File not uploaded
+		if resume_uploaded == 0:
+			request.state.cursor.execute(
+				'''
+				SELECT first_name, last_name, email, summary
+				FROM Seeker
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			seeker = request.state.cursor.fetchone()
+			request.state.cursor.execute(
+				'''
+				SELECT institution_name, education_level, education_field, date_start, date_end, present
+				FROM Education
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			education = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT job_title, company_name, address, city, state, date_start, date_end,  present, remote, job_description
+				FROM Experience
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			experience = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT skill_name, skill_years
+				FROM Skill
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			skill = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT link_name, link_url
+				FROM Url
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			link = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT publication_name, publication_url, publication_date, publication_summary
+        FROM Publication
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			publication = request.state.cursor.fetchone()
+			resume = {'success': True, 'seeker': seeker, 'education': education, 'experience': experience, 'skill': skill, 'link': link, 'publication': publication}
+		# File uploaded
+		elif resume_uploaded == 1:
+			request.state.cursor.execute(
+				'''
+				SELECT resume_url
+				FROM Seeker INNER JOIN Application
+				ON Seeker.seeker_id = Application.seeker_id
+				WHERE Application.seeker_id = UNHEX(%(seeker_id)s);
+				''',{
+					'seeker_id': applicant['userId']
+				}
+			)
+			resume_url = request.state.cursor.fetchone()['resume_url']
+			resume = {'success': True, 'resume_url': resume_url}
+		# This else should never be triggered
+		else:
+			raise CustomException(status_code=500, error='failed resume get', detail='null where field set to default false')
+		request.state.cursor.execute(
+			'''
+			UPDATE Application
+			SET Seen = 1
+			WHERE app_index = %(app_index)s;
+			''',{
+				'app_index': appIndex
+			}
+		)
+		write_log(f'{set_timestamp(new_time)} | status: 200 | source: /job/applications/resume | success: get attempt: applicant resume | | @{get_remote_address(request)}\n')
+		response.status_code = 200
+		return resume
+	except Exception as err:
+		print(type(err))
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications/resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applications/resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications/resume | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
 
 	# return {'implemented': False}
 
