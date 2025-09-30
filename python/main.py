@@ -365,6 +365,8 @@ async def job_search_get(request: Request, response: Response, startIndex: int =
 	benefits = None
 	certifications = None
 	try:
+		if perPage > 100:
+			raise CustomException(status_code=400, error='failed get attempt: jobs', detail='jobs per page too high')
 		args = {'start_index': startIndex, 'per_page': perPage}
 		search_query = 'SELECT job_id, company, city, state, is_remote, salary_low, salary_high, employment_type FROM Job WHERE (job_id >= %(start_index)s'
 		if rem == 'false':
@@ -549,7 +551,7 @@ async def get_job_details(job_id, request: Request, response: Response):
 				'job_id': job_id
 			}
 		)
-		exist = request.state.cursor.fetchall()[0]['exist']
+		exist = request.state.cursor.fetchone()['exist']
 		match exist:
 			case 0:
 				pass
@@ -566,7 +568,7 @@ async def get_job_details(job_id, request: Request, response: Response):
 				'job_id': job_id
 			}
 		)
-		[job] = request.state.cursor.fetchall()
+		job = request.state.cursor.fetchone()
 		dat:datetime.datetime = job['date_created']
 		date_iso = dat.isoformat()
 		job['date_created'] = date_iso
@@ -594,6 +596,9 @@ async def get_job_details(job_id, request: Request, response: Response):
 async def forgot_password(params: dict, request: Request, response:Response):
 	return JSONResponse(status_code=200, content={'success': True, 'info': 'not yet implemented'})
 
+
+# Access controlled endpoints
+
 @app.post('/job/add')
 @limiter.limit(limit_value='5/minute')
 async def add_job(params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
@@ -607,7 +612,7 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 		write_log(f'{set_timestamp(new_time)} | | source: /job/add | info: add attempt: job | | attempt: {email}@{get_remote_address(request)}\n')
 		# Input check and validation, must send null for empty or unused values
 		if not 'title' in params or not 'city' in params or not 'state' in params or not 'isRemote' in params or not 'experienceLevel' in params or not 'employmentType' in params or not 'companySize' in params or not 'salaryLow' in params or not 'salaryHigh' in params or not 'jobDescription' in params or not 'expDate' in params or not 'questions' in params:
-			raise CustomException(status_code=403, error='failed job add', detail='missing field')
+			raise CustomException(status_code=400, error='failed job add', detail='missing field')
 		is_remote = params['isRemote']
 		title = params['title']
 		city = params['city']
@@ -696,13 +701,12 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 					'user_id': user['user_id']
 				}
 			)
-			job_id = request.state.cursor.fetchall()
+			job_id = request.state.cursor.fetchone()['job_id']
 			print(job_id)
-			# email = user['email']
-			# company = user['company']
-			# job = job_id['job_id']
-			# write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/add | success: {email} @ {company} added job id: {job} | | @{get_remote_address(request)}\n')
-			return JSONResponse(status_code=201, content={'success': True})#, 'jobId': job})
+			email = user['email']
+			company = user['company']
+			write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/add | success: {email} @ {company} added job id: {job_id} | | @{get_remote_address(request)}\n')
+			return JSONResponse(status_code=201, content={'success': True, 'jobId': job_id})
 		except Exception as err:
 			errstr = str(err)
 			raise CustomException(status_code=500, error='failed job add', detail=errstr)
@@ -719,65 +723,788 @@ async def add_job(params: dict, request: Request, response: Response, user: Anno
 			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /login/employer | error: {err} | | @{get_remote_address(request)}\n')
 			raise HTTPException(status_code=500, detail='Internal server error')
 
-@app.post('/resume')
+# Add resume endpoint
+@app.post('/resume/add')
 @limiter.limit(limit_value='12/minute')
-async def resume(params: dict, request: Request, response: Response):
-	pass
+async def add_resume(params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	print('Add attempt: resume')
+	new_time = get_new_time()
+	write_log(f'{set_timestamp(new_time)} | | source: /resume/add | info: add attempt: resume | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+	try:
+		# Input check and validation, send null for empty or unused fields
+		if not 'summary' in params or not 'education' in params or not 'experience' in params or not 'skill' in params or not 'link' in params or not 'publication' in params:
+			raise CustomException(status_code=400, error='failed resume add', detail='missing field')
+		summary = params['summary']
+		education = params['education']
+		experience = params['experience']
+		skill = params['skill']
+		link = params['link']
+		publication = params['publication']
+		if summary == None:
+			raise CustomException(status_code=400, error='failed resume add', detail='missing field')
+		if not valid_san(summary, 600):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(education):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(experience):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(skill):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(link):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		if not valid_json(publication):
+			raise CustomException(status_code=400, error='failed resume add', detail='invalid input')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed resume add', detail=check['reason'])
+		sql_strs = []
+		entries = [0,0,0,0,0]
+		entries_total = 0
+		args = []
+		if education != None:
+			list_ed = education.values()
+			sql_str = "INSERT INTO Education (seeker_id, institution_name, education_level, education_field, date_start, date_end, present) VALUES(UNHEX(%(user_id)s), %(institution_name)s, %(education_level)s, %(education_field)s, %(date_start)s, %(date_end)s, %(present)s);"
+			date_end = None
+			if len(list_ed) > 2:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many education inputs')
+			valid: bool
+			i = 0
+			for entry in list_ed:
+				if not 'institutionName' in entry or not 'educationLevel' in entry or not 'educationField' in entry or not 'dateStart' in entry or type(entry['present']) != bool:
+					valid = False
+					break
+				if not valid_san(entry['institutionName'], 255) or not valid_san(entry['educationLevel'], 255) or not valid_san(entry['educationField'], 255) or not valid_date(entry['dateStart']):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				if entry['dateEnd'] == None and entry['present'] == False:
+					valid = False
+					break
+				if entry['dateEnd'] != None and entry['present'] == True:
+					valid = False
+					break
+				if entry['dateEnd'] != None and valid_date(entry['dateEnd']):
+					if not valid_dates(entry['dateStart'], entry['dateEnd']):
+						valid = False
+						break
+					else:
+						date = entry['dateEnd'].split('-')
+						date_end = datetime.date(int(date[0]), int(date[1]), 1)
+				valid = True		
+				date = entry['dateStart'].split('-')
+				date_start = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'institution_name': entry['institutionName'],
+					'education_level': entry['educationLevel'],
+					'education_field': entry['educationField'],
+					'date_start': date_start,
+					'date_end': date_end,
+					'present': entry['present']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid education input')
+			entries[0] = i
+			entries_total += i
+		if experience != None:
+			list_ex = experience.values()
+			sql_str = "INSERT INTO Experience (seeker_id, job_title, company_name, remote, address, city, state, date_start, date_end, present, job_description) VALUES(UNHEX(%(user_id)s), %(job_title)s, %(company_name)s, %(remote)s, %(address)s, %(city)s, %(state)s, %(date_start)s, %(date_end)s, %(present)s, %(job_description)s);"
+			date_end = None
+			if len(list_ex) > 3:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_ex:
+				if not 'jobTitle' in entry or not 'companyName' in entry or not 'address' in entry or not 'city' in entry or not 'state' in entry or not 'dateStart' in entry or type(entry['remote']) != bool or type(entry['present']) != bool or not 'jobDescription' in entry:
+					valid = False
+					break
+				if not valid_san(entry['jobTitle'], 255) or not valid_san(entry['companyName'], 255) or not valid_san(entry['city'], 255) or not valid_state(entry['state']) or not valid_date(entry['dateStart']):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				if entry['dateEnd'] == None and entry['present'] == False:
+					valid = False
+					break
+				if entry['dateEnd'] != None and entry['present'] == True:
+					valid = False
+					break
+				if entry['dateEnd'] != None and valid_date(entry['dateEnd']):
+					if not valid_dates(entry['dateStart'], entry['dateEnd']):
+						valid = False
+						break
+					else:
+						date = entry['dateEnd'].split('-')
+						date_end = datetime.date(int(date[0]), int(date[1]), 1)
+				if entry['address'] == None and entry['remote'] == False:
+					valid = False
+					break
+				if entry['address'] != None and entry['remote'] == True:
+					valid = False
+					break
+				if entry['jobDescription'] != None and not valid_san(entry['jobDescription'], 600):
+					valid = False
+					break
+				date = entry['dateStart'].split('-')
+				date_start = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'job_title': entry['jobTitle'],
+					'company_name': entry['companyName'],
+					'address': entry['address'],
+					'city': entry['city'],
+					'state': entry['state'],
+					'date_start': date_start,
+					'date_end': date_end,
+					'present': entry['present'],
+					'remote': entry['remote'],
+					'job_description': entry['jobDescription']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid experience input')
+			entries[1] = i
+			entries_total += i
+		if skill != None:
+			list_sk = skill.values()
+			sql_str = "INSERT INTO Skill (seeker_id, skill_name, skill_years) VALUES(UNHEX(%(user_id)s), %(skill_name)s, %(skill_years)s);"
+			if len(list_sk) > 25:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many skill inputs')
+			valid: bool
+			i = 0
+			for entry in list_sk:
+				if not 'skillName' in entry or not 'skillYears' in entry:
+					valid = False
+					break
+				if not valid_san(entry['skillName'], 255) or not valid_n(entry['skillYears']):
+					valid = False
+					break
+				if len(entry['skillName']) > 255 or len(entry['skillYears']) > 50 or len(entry['skillYears']) < 1:
+					valid = False
+					break
+				sql_args = {
+					'user_id': user['user_id'],
+					'skill_name': entry['skillName'],
+					'skill_years': entry['skillYears']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid skill input')
+			entries[2] = i
+			entries_total += i
+		if link != None:
+			list_lk = link.values()
+			sql_str = "INSERT INTO Url (seeker_id, link_name, link_url) VALUES(UNHEX(%(user_id)s), %(link_name)s, %(link_url)s);"
+			if len(list_lk) > 5:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_lk:
+				if not 'linkName' in entry or not 'linkUrl' in entry:
+					valid = False
+					break
+				if not valid_san(entry['linkName'], 255) or not valid_san(entry['linkUrl'], 2047):
+					valid = False
+					break
+				if entry['dateEnd'] != None and not valid_date(entry['dateEnd']):
+					valid = False
+					break
+				sql_args = {
+					'link_name': user['linkName'],
+					'link_url': entry['linkUrl']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid experience input')
+			entries[3] = i
+			entries_total += i
+		if publication != None:
+			list_pb = publication.values()
+			sql_str = "INSERT INTO Publication (seeker_id, publication_name, publication_url, publication_date, publication_summary) VALUES(UNHEX(%(user_id)s), %(publication_name)s, %(publication_url)s, %(publication_date)s, %(publication_summary)s);"
+			if len(list_ed) > 3:
+				raise CustomException(status_code=400, error='failed resume add', detail='too many experience inputs')
+			valid: bool
+			i = 0
+			for entry in list_pb:
+				if not 'jobTitle' in entry or not 'pubName' in entry or not 'pubUrl' in entry or not 'pubDate' in entry or not 'pubSummary' in entry:
+					valid = False
+					break
+				if not valid_san(entry['pubName'], 255) or not valid_san(entry['pubUrl'], 2047) or not valid_date(entry['pubDate']) or not valid_san(entry['pubSummary'], 600):
+					valid = False
+					break
+				date = entry['pubDate'].split('-')
+				date_pub = datetime.date(int(date[0]), int(date[1]), 1)
+				sql_args = {
+					'user_id': user['user_id'],
+					'publication_name': entry['pubName'],
+					'publication_url': entry['pubUrl'],
+					'publication_date': date_pub,
+					'publication_summary': entry['pubSummary']
+				}
+				sql_strs.append(sql_str)
+				args.append(sql_args)
+				i+=1
+			if not valid:
+				raise CustomException(status_code=400, error='failed resume add', detail='invalid publication input')
+			entries[4] = i
+			entries_total += i
+		if len(sql_strs) != len(args) or len(args) != entries_total:
+			raise CustomException(status_code=500, error='failed resume add', detail='stings, args, entries miscount')
+		sql_strs.append('UPDATE Seeker SET summary = %(summary)s, education_entries = %(education_entries)s, experience_entries = %(experience_entries)s, skill_entries = %(skill_entries)s, link_entries = %(link_entries)s, publication_entries = %(publication_entries)s WHERE seeker_id = UNHEX(%(user_id)s);')
+		args.append({
+			'summary': summary,
+			'education_entries': entries[0],
+			'experience_entries': entries[1],
+			'skill_entries': entries[2],
+			'link_entries': entries[3],
+			'publication_entries': entries[4],
+			'user_id': user['user_id']
+		})
+		entries_total += 1
+		tables = ['Education', 'Experience', 'Skill', 'Url', 'Publication']
+		for entry in tables:
+			request.state.cursor.execute(
+				"DELETE "
+					f"FROM {entry} "
+					"WHERE seeker_id = UNHEX(%(user_id)s);"
+			,{
+				'user_id': user['user_id']
+			})
+		request.state.db.commit()
+		for i in range(entries_total):
+			sql_str = sql_strs[i]
+			sql_arg = args[i]
+			request.state.cursor.execute(sql_str, sql_arg)
+	except Exception as err:
+		print(err)
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume/add | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /resume/add | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume/add | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.get('/resume')
+@limiter.limit('40/minute')
+async def get_resume(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	new_time = get_new_time()
+	print('Get attempt: resume')
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /resume | info: get attempt: resume | | {user["email"]}@{get_remote_address(request)}\n')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed get attempt: resume', detail=check['reason'])
+		request.state.cursor.execute(
+			'''
+				SELECT first_name, last_name, email, summary
+				FROM Seeker
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		seeker = request.state.cursor.fetchone()
+		request.state.cursor.execute(
+			'''
+				SELECT institution_name, education_level, education_field, date_start, date_end, present
+        FROM Education
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		education = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT job_title, company_name, address, city, state, date_start, date_end,  present, remote, job_description
+        FROM Experience
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		experience = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT skill_name, skill_years
+        FROM Skill
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		skill = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT link_name, link_url
+        FROM Url
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		link = request.state.cursor.fetchall()
+		request.state.cursor.execute(
+			'''
+				SELECT publication_name, publication_url, publication_date, publication_summary
+        FROM Publication
+				WHERE seeker_id = UNHEX(%(user_id)s);
+			''',{
+				'user_id': user['user_id']
+			}
+		)
+		publication = request.state.cursor.fetchall()
+		if education == []:
+			education = None
+		if experience == []:
+			experience = None
+		if skill == []:
+			skill = None
+		if link == []:
+			link = None
+		if publication == []:
+			publication = None
+		write_log(f'{set_timestamp(new_time)} | status: 200 | source: /resume | success: get attempt: resume | | @{get_remote_address(request)}\n')
+		response.status_code = 200
+		return {
+			'seeker': seeker,
+			'education': education,
+			'experience': experience,
+			'skill': skill,
+			'link': link,
+			'publication': publication
+		}
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /resume | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.post('/job/apply/{job_id}/submit')
+@limiter.limit(limit_value='1/second')# 1/minute
+async def apply(job_id: int, params: dict, request: Request, response: Response, user: Annotated[dict, Security(check_jwt)]):
+	print('add attempt: application')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/apply/{job_id}/submit | info: add attempt: application | | attempt: {user["email"]}@{get_remote_address(request)}')
+		# Get and validate input
+		answers = params['answers']
+		if not valid_json(answers):
+			raise CustomException(status_code=400, error='failed application add', detail='invalid input')
+		# Ensure all question are answered
+		questions: dict
+		request.state.cursor.execute(
+			'''
+			SELECT questions
+			FROM job
+			WHERE job_id = %(job_id)s;
+			''',{
+				'job_id': job_id
+			}
+		)
+		ques_holder = request.state.cursor.fetchone()['questions']
+		questions = None
+		if ques_holder != None:
+			questions = json.loads(ques_holder)
+		if questions == None and answers != None:
+			raise CustomException(status_code=400, error='failed application add', detail='answers with no questions')
+		if questions != None:
+			if answers == None or len(answers) < len(questions):
+				raise CustomException(status_code=400, error='failed application add', detail='questions with no answers')
+			if len(answers) > len(questions):
+				raise CustomException(status_code=400, error='failed application add', detail='too many answers')
+		# Check if seeker has previously applied to job
+		request.state.cursor.execute(
+			'''
+			SELECT CASE
+			WHEN EXISTS (
+				SELECT 1 FROM Application
+				WHERE (job_id = %(job_id)s AND seeker_id = UNHEX(%(seeker_id)s))
+			)
+			THEN (
+				SELECT job_id FROM Application
+				WHERE (job_id = %(job_id)s AND seeker_id = UNHEX(%(seeker_id)s))
+			)
+			ELSE NULL
+			END AS job_id
+			FROM Application;
+			''',{
+				'job_id': job_id,
+				'seeker_id': user['user_id']
+			}
+		)
+		check_repeat = request.state.cursor.fetchone()
+		if check_repeat['job_id'] != None:
+			raise CustomException(status_code=400, error='failed application add', detail='already applied')
+		# Check if user exists and is valid to apply
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed application add', detail=check['reason'])
+		if check['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed application add', detail='wrong user type')
+		answers_formatted = None
+		if answers != None:
+			answers_formatted = json.dumps(answers, separators=(',', ':'))
+		request.state.cursor.execute(
+			'''
+			INSERT INTO Application(seeker_id, job_id, answers)
+      VALUE(UNHEX(%(seeker_id)s), %(job_id)s, %(answers)s);
+			''',{
+				'seeker_id': user['user_id'],
+				'job_id': job_id,
+				'answers': answers_formatted
+			}
+		)
+		write_log(f'{set_timestamp(new_time)} | status: 201 | source: /job/apply | success: application added | | @{get_remote_address(request)}\n')
+		return JSONResponse(status_code=201, content={'message': 'application submitted'})
+	except Exception as err:
+		print(err)
+		traceback.print_exc()
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/apply/{job_id}/submit | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/apply/{job_id}/submit | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/apply/{job_id}/submit | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+@app.get('/job/applied')
+@limiter.limit(limit_value='5/second')
+async def applied(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], startIndex: int = 1, perPage: int = 10):
+	print('Get attempt: jobs applied')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applied | info: get attempt: jobs applied | | attempt: @{get_remote_address(request)}\n')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applied get', detail=check['reason'])
+		if check['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed applied get', detail='wrong user type')
+		request.state.cursor.execute(
+			'''
+			SELECT title, date_applied, questions, answers, seen, accepted, rejected
+			FROM Application INNER JOIN Job
+			ON Job.job_id = Application.job_id
+			WHERE (app_index >= %(start_index)s AND Application.seeker_id = UNHEX(%(user_id)s) AND Job.delete_flag = 0)
+			ORDER BY date_applied DESC
+			LIMIT %(per_page)s;
+			''',{
+				'user_id': user['user_id'],
+				'start_index': startIndex,
+				'per_page': perPage
+			}
+		)
+		apps = request.state.cursor.fetchall()
+		response.status_code = 200
+		return apps
+	except Exception as err:
+		print(type(err))
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applied | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applied | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applied | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+# Get current applications for user's company
+@app.get('/job/applications')
+@limiter.limit('5/second')
+async def application(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], endIndex: int = 0, perPage: int = 10):
+	print('Get attempt: applications')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applications | info: get attempt: applications | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+		if perPage >100:
+			raise CustomException(status_code=400, error='failed applications get', detail='applications per page too high')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applications get', detail=check['reason'])
+		if check['usertype'] != 'employer':
+			raise CustomException(status_code=400, error='failed applications get', detail='wrong user type')
+		check: bool
+		try:
+			check = check_auth(request, user['user_id'], user['company'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
+		if check == False:
+			raise CustomException(status_code=403, error='failed applications get', detail='failed approval')
+		if endIndex == 0: # first page, because why pass (2^32)-1
+			request.state.cursor.execute(
+				'''
+				SELECT HEX(Seeker.seeker_id) AS user_id, email, Job.job_id, app_index, title, first_name, last_name, seen, accepted, rejected
+				FROM Application INNER JOIN (Seeker, Job)
+				ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+				WHERE (Job.company = %(company)s AND Seeker.delete_flag = 0 AND Job.delete_flag = 0)
+				ORDER BY date_applied DESC
+				LIMIT %(per_page)s;
+				''',{
+					'company': user['company'],
+					'per_page': perPage
+				}
+			)
+		else:
+			request.state.cursor.execute(
+				'''
+				SELECT HEX(Seeker.seeker_id) AS user_id, email, Job.job_id, app_index, title, first_name, last_name, seen, accepted, rejected
+				FROM Application INNER JOIN (Seeker, Job)
+				ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+				WHERE (Job.company = %(company)s AND Seeker.delete_flag = 0 AND Job.delete_flag = 0 AND app_index < %(end_index)s)
+				ORDER BY date_applied DESC
+				LIMIT %(per_page)s;
+				''',{
+					'company': user['company'],
+					'end_index': endIndex,
+					'per_page': perPage
+				}
+			)
+		appls = request.state.cursor.fetchall()
+		response.status_code = 200
+		
+		return {'success': True, 'apps': appls}
+	except Exception as err:
+		print(type(err))
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applications | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+# Get resume attached to specific application
+@app.get('/job/applications/resume')
+@limiter.limit(limit_value='5/second')
+async def apps_resume(request: Request, response: Response, user: Annotated[dict, Security(check_jwt)], appIndex: int, email: str):
+	print('Get attempt: applicant resume')
+	new_time = get_new_time()
+	try:
+		write_log(f'{set_timestamp(new_time)} | | source: /job/applications/resume | info: get attempt: applicant resume | | attempt: {user["email"]}@{get_remote_address(request)}\n')
+		if not valid_san(email, 255):
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='invalid applicant email')
+		check: dict
+		try:
+			check = await check_user(request, user['email'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if check['exists'] == False:
+			raise CustomException(status_code=400, error='failed applicant resume get', detail=check['reason'])
+		if check['usertype'] != 'employer':
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='wrong user type')
+		check: bool
+		try:
+			check = check_auth(request, user['user_id'], user['company'])
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='authorization failed')
+		if check == False:
+			raise CustomException(status_code=403, error='failed applicant resume get', detail='failed approval')
+		# Get applicant user info
+		applicant: dict
+		try:
+			applicant = await check_user(request, email)
+		except Exception as err:
+			errstr = str(err)
+			raise CustomException(status_code=500, error=errstr, detail='check failed')
+		if applicant['exists'] == False:
+			raise CustomException(status_code=400, error='failed applicant resume get', detail=applicant['reason'])
+		if applicant['usertype'] != 'seeker':
+			raise CustomException(status_code=400, error='failed applicant resume get', detail='wrong user type')
+		# Check if resume was file upload
+		request.state.cursor.execute(
+			'''
+			SELECT CASE
+				WHEN EXISTS(SELECT 1
+					FROM Application INNER JOIN (Seeker, Job)
+					ON (Seeker.seeker_id = Application.seeker_id AND Job.job_id = Application.job_id)
+					WHERE (Application.seeker_id = UNHEX(%(seeker_id)s) AND Job.company = %(company)s))
+				THEN(SELECT resume_uploaded
+					FROM Seeker
+					WHERE seeker_id = UNHEX(%(seeker_id)s))
+				ELSE NULL
+			END AS resume_uploaded;
+			''',{
+				'company': user['company'],
+				'seeker_id': applicant['userId']
+			}
+		)
+		resume_uploaded = request.state.cursor.fetchone()['resume_uploaded']
+		resume: dict
+		# File not uploaded
+		if resume_uploaded == 0:
+			request.state.cursor.execute(
+				'''
+				SELECT first_name, last_name, email, summary
+				FROM Seeker
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			seeker = request.state.cursor.fetchone()
+			request.state.cursor.execute(
+				'''
+				SELECT institution_name, education_level, education_field, date_start, date_end, present
+				FROM Education
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			education = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT job_title, company_name, address, city, state, date_start, date_end,  present, remote, job_description
+				FROM Experience
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			experience = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT skill_name, skill_years
+				FROM Skill
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			skill = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT link_name, link_url
+				FROM Url
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			link = request.state.cursor.fetchall()
+			request.state.cursor.execute(
+				'''
+				SELECT publication_name, publication_url, publication_date, publication_summary
+        FROM Publication
+				WHERE seeker_id = UNHEX(%(user_id)s);
+				''',{
+					'user_id': applicant['userId']
+				}
+			)
+			publication = request.state.cursor.fetchone()
+			resume = {'success': True, 'seeker': seeker, 'education': education, 'experience': experience, 'skill': skill, 'link': link, 'publication': publication}
+		# File uploaded
+		elif resume_uploaded == 1:
+			request.state.cursor.execute(
+				'''
+				SELECT resume_url
+				FROM Seeker INNER JOIN Application
+				ON Seeker.seeker_id = Application.seeker_id
+				WHERE Application.seeker_id = UNHEX(%(seeker_id)s);
+				''',{
+					'seeker_id': applicant['userId']
+				}
+			)
+			resume_url = request.state.cursor.fetchone()['resume_url']
+			resume = {'success': True, 'resume_url': resume_url}
+		# This else should never be triggered
+		else:
+			raise CustomException(status_code=500, error='failed resume get', detail='null where field set to default false')
+		request.state.cursor.execute(
+			'''
+			UPDATE Application
+			SET Seen = 1
+			WHERE app_index = %(app_index)s;
+			''',{
+				'app_index': appIndex
+			}
+		)
+		write_log(f'{set_timestamp(new_time)} | status: 200 | source: /job/applications/resume | success: get attempt: applicant resume | | @{get_remote_address(request)}\n')
+		response.status_code = 200
+		return resume
+	except Exception as err:
+		print(type(err))
+		if type(err) == CustomException:
+			if err.status_code == 500:
+				write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications/resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail='Internal server error')
+			else:
+				write_log(f'{set_timestamp(new_time)} | status: {err.status_code} | source: /job/applications/resume | error: {err.error} | reason: {err.detail} | @{get_remote_address(request)}\n')
+				raise HTTPException(status_code=err.status_code, detail=err.detail)
+		else:
+			write_log(f'{set_timestamp(new_time)} | status: 500 | source: /job/applications/resume | error: {err} | | @{get_remote_address(request)}\n')
+			raise HTTPException(status_code=500, detail='Internal server error')
+
+
+	# return {'implemented': False}
 
 @app.post('/add') # for testing
 @limiter.limit(limit_value='5/minute')
 async def add(params: dict, request: Request, response: Response):#, user: Annotated[dict, Security(check_jwt)]):
 	new_time = get_new_time()
 	try:
-		# user = check_jwt(request)
-		# print(type(user))
-		# if type(user) == CustomException:
-		# 	raise CustomException(status_code=user.status_code, error=user.error, detail=user.detail)
-		is_remote = params['isRemote']
-		title = params['title']
-		city = params['city']
-		state = params['state']
-		experience_level = params['experienceLevel']
-		employment_type = params['employmentType']
-		company_size = params['companySize']
-		salary_low = params['salaryLow']
-		salary_high = params['salaryHigh']
-		benefits = params['benefits']
-		certifications = params['certifications']
-		job_description = params['jobDescription']
-		exp_date = params['expDate']
-		questions = params['questions']
-		valid_exp_dates = valid_exp_date(exp_date)
-		if not valid_san(title, 255):
-			bob(1)
-		if not valid_a(city, 255):
-			bob(2)
-		if not valid_state(state):
-			bob(3)
-		if not valid_a(experience_level, 255):
-			bob(4)
-		if not valid_san(employment_type, 255):
-			bob(5)
-		if not valid_san(company_size, 255):
-			bob(6)
-		if not valid_n(salary_low):
-			bob(7)
-		if not valid_n(salary_high):
-			bob(8)
-		if not valid_json(benefits):
-			bob(9)
-		if not valid_json(certifications):
-			bob(10)
-		if not valid_san(job_description, 600):
-			bob(11)
-		if not valid_json(questions):
-			bob(12)
-		if not valid_exp_dates == True:
-			bob(13)
-		if not type(is_remote) == bool:
-			bob(14)
-		bob('good')
-		return JSONResponse(status_code=200, content='good')
+		response.status_code = 201
+		return {'status_code':200, 'content':'good'}
 	except Exception as err:
 		print(type(err))
 		traceback.print_exc()
@@ -804,11 +1531,11 @@ async def add(params: dict, request: Request, response: Response):#, user: Annot
 
 #@app.post('/add-file')
 #async def add_file()
-@app.get('/seeker')
-async def seeker(req: Request):
-	req.state.cursor.execute('select hex(seeker_id), email, delete_flag from seeker;')
-	print(req.state.cursor.fetchone())
-	print('henlo')
+# @app.get('/seeker')
+# async def seeker(req: Request):
+# 	req.state.cursor.execute('select hex(seeker_id), email, delete_flag from seeker;')
+# 	print(req.state.cursor.fetchone())
+# 	print('henlo')
 
 @app.post("/upload-image")
 @limiter.limit(limit_value='5/minute')
